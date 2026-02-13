@@ -1,0 +1,23 @@
+CREATE TABLE IF NOT EXISTS polydb_audit_log (
+    audit_id TEXT PRIMARY KEY,
+    timestamp TIMESTAMP,
+    tenant_id TEXT,
+    actor_id TEXT,
+    roles JSONB,
+    action TEXT,
+    model TEXT,
+    entity_id TEXT,
+    storage_type TEXT,
+    provider TEXT,
+    success BOOLEAN,
+    before JSONB,
+    after JSONB,
+    changed_fields JSONB,
+    trace_id TEXT,
+    request_id TEXT,
+    ip_address TEXT,
+    user_agent TEXT,
+    error TEXT,
+    hash TEXT,
+    previous_hash TEXT
+);

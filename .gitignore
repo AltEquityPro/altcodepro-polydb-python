@@ -1,0 +1,123 @@
+# =========================
+# Python Bytecode
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# C Extensions
+# =========================
+*.so
+
+# =========================
+# Distribution / Packaging
+# =========================
+.Python
+build/
+dist/
+downloads/
+eggs/
+.eggs/
+*.egg-info/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =========================
+# Virtual Environments
+# =========================
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# =========================
+# Testing / Coverage
+# =========================
+.coverage
+.coverage.*
+.cache
+.pytest_cache/
+nosetests.xml
+coverage.xml
+htmlcov/
+.tox/
+noxfile.py
+.hypothesis/
+
+# =========================
+# Type Checkers
+# =========================
+.mypy_cache/
+.pyre/
+.pytype/
+
+# =========================
+# Jupyter Notebooks
+# =========================
+.ipynb_checkpoints
+
+# =========================
+# Logs
+# =========================
+*.log
+
+# =========================
+# IDEs
+# =========================
+.vscode/
+.idea/
+*.iml
+
+# =========================
+# OS Files
+# =========================
+.DS_Store
+Thumbs.db
+
+# =========================
+# Environment Variables
+# =========================
+.env.*
+*.env
+
+# =========================
+# SQLite (if used in tests)
+# =========================
+*.sqlite3
+*.db
+
+# =========================
+# PyInstaller
+# =========================
+*.spec
+
+# =========================
+# Poetry
+# =========================
+poetry.lock
+
+# =========================
+# PDM
+# =========================
+.pdm.toml
+
+# =========================
+# Ruff / Lint
+# =========================
+.ruff_cache/
+
+# =========================
+# Caches
+# =========================
+*.py*

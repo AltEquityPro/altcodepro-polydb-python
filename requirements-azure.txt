@@ -1,0 +1,9 @@
+# Azure requirements
+# Install: pip install -r requirements-azure.txt
+
+azure-core>=1.38.1
+azure-data-tables>=12.7.0
+azure-storage-blob>=12.28.0
+azure-storage-file-share>=12.24.0
+azure-storage-queue>=12.15.0
+psycopg2-binary>=2.9.11
