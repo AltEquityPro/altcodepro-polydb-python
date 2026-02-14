@@ -7,7 +7,7 @@ import uuid
 import hashlib
 import json
 
-from src.polydb.json_safe import json_safe
+from ..json_safe import json_safe
 
 
 @dataclass

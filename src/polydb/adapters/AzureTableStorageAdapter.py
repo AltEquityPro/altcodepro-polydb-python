@@ -3,7 +3,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
-from src.polydb.json_safe import json_safe
+from ..json_safe import json_safe
 from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
 from ..types import JsonDict

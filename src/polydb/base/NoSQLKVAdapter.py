@@ -6,7 +6,7 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
-from src.polydb.json_safe import json_safe
+from ..json_safe import json_safe
 
 from ..errors import NoSQLError, StorageError
 from ..retry import retry

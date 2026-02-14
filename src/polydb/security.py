@@ -11,7 +11,7 @@ import json
 from functools import wraps
 import logging
 
-from src.polydb.json_safe import json_safe
+from .json_safe import json_safe
 
 logger = logging.getLogger(__name__)
 

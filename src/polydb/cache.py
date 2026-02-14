@@ -8,7 +8,7 @@ import hashlib
 import threading
 from enum import Enum
 import redis
-from src.polydb.json_safe import json_safe
+from .json_safe import json_safe
 
 class CacheStrategy(Enum):
     """Cache invalidation strategies"""

@@ -6,7 +6,7 @@ from google.cloud import firestore
 from google.cloud import storage
 from google.cloud.firestore import Client
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
-from src.polydb.json_safe import json_safe
+from ..json_safe import json_safe
 
 from ..errors import NoSQLError, ConnectionError
 from ..retry import retry

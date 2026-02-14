@@ -157,9 +157,6 @@ class DatabaseFactory:
         return data
 
     def _apply_soft_delete_filter(self, query: Optional[Lookup]) -> Lookup:
-        if not self._soft_delete:
-            return query or {}
-
         result = dict(query or {})
         result.setdefault("deleted_at", None)
         return result
@@ -310,7 +307,7 @@ class DatabaseFactory:
         meta = self._meta(model)
         tenant_id = self._current_tenant_id()
         actor_id = self._current_actor_id()
-        query = self._apply_soft_delete_filter(query if not include_deleted else None)
+        query =  self._apply_soft_delete_filter(query) if  include_deleted else query
         # Multi-tenancy & RLS filters
         if self.tenant_enforcer:
             query = self.tenant_enforcer.enforce_read(model_name, query or {})
@@ -421,7 +418,7 @@ class DatabaseFactory:
         tenant_id = self._current_tenant_id()
         actor_id = self._current_actor_id()
 
-        query = self._apply_soft_delete_filter(query if not include_deleted else None)
+        query =  self._apply_soft_delete_filter(query) if  include_deleted else query
 
         if self.tenant_enforcer:
             query = self.tenant_enforcer.enforce_read(model_name, query or {})

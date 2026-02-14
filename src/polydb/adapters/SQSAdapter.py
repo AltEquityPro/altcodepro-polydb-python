@@ -12,7 +12,7 @@ import os
 import threading
 from typing import Any, Dict, List
 
-from src.polydb.json_safe import json_safe
+from ..json_safe import json_safe
 
 
 class SQSAdapter(QueueAdapter):

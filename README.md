@@ -1,4 +1,4 @@
-# PolyDB v2.2.0 - Enterprise Database Abstraction Layer
+# PolyDB v2.2.2 - Enterprise Database Abstraction Layer
 
 **Production-ready, cloud-independent database abstraction with full LINQ support, field-level audit, cache, and overflow storage**
 
