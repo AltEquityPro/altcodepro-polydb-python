@@ -4,7 +4,7 @@ Multi-tenancy enforcement and isolation
 """
 from typing import Dict, Any, List, Optional, Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 
 
@@ -24,7 +24,7 @@ class TenantConfig:
     database_name: Optional[str] = None
     max_connections: int = 10
     storage_quota_gb: Optional[float] = None
-    features: List[str] = []
+    features: List[str] = field(default_factory=list)
 
 
 class TenantRegistry:

@@ -11,6 +11,8 @@ import json
 from functools import wraps
 import logging
 
+from src.polydb.json_safe import json_safe
+
 logger = logging.getLogger(__name__)
 
 
@@ -48,7 +50,7 @@ class FieldEncryption:
         """Encrypt arbitrary value (serialize if non-str)"""
         if value is None:
             return ""
-        data = json.dumps(value) if not isinstance(value, str) else value
+        data = json.dumps(value,default=json_safe) if not isinstance(value, str) else value
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 

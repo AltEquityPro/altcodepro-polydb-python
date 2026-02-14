@@ -7,6 +7,8 @@ import os
 import threading
 from typing import Any, Dict, List
 
+from src.polydb.json_safe import json_safe
+
 class PubSubAdapter(QueueAdapter):
     """GCP Pub/Sub with client reuse"""
 
@@ -42,7 +44,7 @@ class PubSubAdapter(QueueAdapter):
                 topic_path = self._publisher.topic_path(
                     self.project_id, queue_name or self.topic_name
                 )
-                data = json.dumps(message).encode("utf-8")
+                data = json.dumps(message,default=json_safe).encode("utf-8")
                 future = self._publisher.publish(topic_path, data)
                 return future.result()
             return ""

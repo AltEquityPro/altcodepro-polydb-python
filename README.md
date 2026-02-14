@@ -1,4 +1,4 @@
-# PolyDB v3.0 - Enterprise Database Abstraction Layer
+# PolyDB v2.2.0 - Enterprise Database Abstraction Layer
 
 **Production-ready, cloud-independent database abstraction with full LINQ support, field-level audit, cache, and overflow storage**
 
@@ -163,8 +163,8 @@ users = db.read(User, {"role": "admin"})
 users = db.read(User, {"role": "admin"}, no_cache=True)
 
 # Manual invalidation
-from polydb.cache import CacheEngine
-cache = CacheEngine()
+from polydb.cache import RedisCacheEngine
+cache = RedisCacheEngine()
 cache.invalidate("User")
 cache.clear()
 ```

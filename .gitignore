@@ -35,12 +35,13 @@ wheels/
 # =========================
 .env
 .venv
+token.txt
 env/
 venv/
 ENV/
 env.bak/
 venv.bak/
-
+.env
 # =========================
 # Testing / Coverage
 # =========================

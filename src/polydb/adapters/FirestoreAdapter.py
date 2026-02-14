@@ -6,6 +6,7 @@ from google.cloud import firestore
 from google.cloud import storage
 from google.cloud.firestore import Client
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
+from src.polydb.json_safe import json_safe
 
 from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
@@ -66,7 +67,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
             data_copy['_rk'] = rk
             
             # Check size
-            data_bytes = json.dumps(data_copy).encode()
+            data_bytes = json.dumps(data_copy,default=json_safe).encode()
             data_size = len(data_bytes)
             
             if data_size > self.FIRESTORE_MAX_SIZE:

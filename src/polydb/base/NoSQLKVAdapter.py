@@ -6,6 +6,8 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
+from src.polydb.json_safe import json_safe
+
 from ..errors import NoSQLError, StorageError
 from ..retry import retry
 from ..query import QueryBuilder, Operator
@@ -36,7 +38,7 @@ class NoSQLKVAdapter:
             try:
                 pk = self.partition_config.partition_key_template.format(**data)
             except KeyError:
-                pk = f"default_{data.get(pk_field, hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()[:8])}"
+                pk = f"default_{data.get(pk_field, hashlib.md5(json.dumps(data, sort_keys=True,default=json_safe).encode()).hexdigest()[:8])}"
         else:
             pk = str(data.get(pk_field, 'default'))
         
@@ -46,16 +48,16 @@ class NoSQLKVAdapter:
             try:
                 rk = self.partition_config.row_key_template.format(**data)
             except KeyError:
-                rk = hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest()
+                rk = hashlib.md5(json.dumps(data, sort_keys=True,default=json_safe).encode()).hexdigest()
         else:
-            rk = data.get('id', hashlib.md5(json.dumps(data, sort_keys=True).encode()).hexdigest())
+            rk = data.get('id', hashlib.md5(json.dumps(data, sort_keys=True,default=json_safe).encode()).hexdigest())
         
         return str(pk), str(rk)
     
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _check_overflow(self, data: JsonDict) -> Tuple[JsonDict, Optional[str]]:
         """Check size and store in blob if needed"""
-        data_bytes = json.dumps(data).encode()
+        data_bytes = json.dumps(data,default=json_safe).encode()
         data_size = len(data_bytes)
         
         if data_size > self.max_size:
@@ -292,7 +294,7 @@ class NoSQLKVAdapter:
             seen = set()
             unique = []
             for r in results:
-                key = json.dumps(r, sort_keys=True)
+                key = json.dumps(r, sort_keys=True,default=json_safe)
                 if key not in seen:
                     seen.add(key)
                     unique.append(r)

@@ -8,6 +8,7 @@ import hashlib
 import threading
 from enum import Enum
 import redis
+from src.polydb.json_safe import json_safe
 
 class CacheStrategy(Enum):
     """Cache invalidation strategies"""
@@ -58,7 +59,7 @@ class RedisCacheEngine:
     
     def _make_key(self, model: str, query: Dict[str, Any]) -> str:
         """Generate cache key"""
-        query_str = json.dumps(query, sort_keys=True)
+        query_str = json.dumps(query, sort_keys=True,default=json_safe)
         query_hash = hashlib.md5(query_str.encode()).hexdigest()
         return f"{self.prefix}{model}:{query_hash}"
     
@@ -94,7 +95,7 @@ class RedisCacheEngine:
         ttl = ttl or self.default_ttl
         
         try:
-            data = json.dumps(value)
+            data = json.dumps(value,default=json_safe)
             self._client.setex(key, ttl, data)
             
             # Initialize access count

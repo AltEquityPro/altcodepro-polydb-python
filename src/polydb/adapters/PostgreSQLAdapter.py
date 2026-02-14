@@ -21,8 +21,10 @@ class PostgreSQLAdapter:
         self.logger = setup_logger(__name__)
         self.connection_string = os.getenv(
             "POSTGRES_CONNECTION_STRING",
-            os.getenv("POSTGRES_URL", "postgresql://user:password@localhost:5432/database"),
+            os.getenv("POSTGRES_URL", ""),
         )
+        if not self.connection_string:
+            raise ConnectionError("POSTGRES_CONNECTION_STRING or POSTGRES_URL must be set")
         self._pool = None
         self._lock = threading.Lock()
         self._initialize_pool()

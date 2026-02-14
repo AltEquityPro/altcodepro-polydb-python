@@ -3,6 +3,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
+from src.polydb.json_safe import json_safe
 from ..errors import NoSQLError, StorageError
 from ..retry import retry
 from ..types import JsonDict
@@ -36,7 +37,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
             data_copy['_rk'] = rk
             
             # Check size
-            data_bytes = json.dumps(data_copy).encode()
+            data_bytes = json.dumps(data_copy,default=json_safe).encode()
             data_size = len(data_bytes)
             
             if data_size > self.VERCEL_KV_MAX_SIZE:
@@ -69,7 +70,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
                 response = requests.post(
                     f"{self.kv_url}/set/{key}",
                     headers={'Authorization': f'Bearer {self.kv_token}'},
-                    json={'value': json.dumps(reference_data)},
+                    json={'value': json.dumps(reference_data,default=json_safe)},
                     timeout=self.timeout
                 )
                 response.raise_for_status()
@@ -78,7 +79,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
                 response = requests.post(
                     f"{self.kv_url}/set/{key}",
                     headers={'Authorization': f'Bearer {self.kv_token}'},
-                    json={'value': json.dumps(data_copy)},
+                    json={'value': json.dumps(data_copy,default=json_safe)},
                     timeout=self.timeout
                 )
                 response.raise_for_status()

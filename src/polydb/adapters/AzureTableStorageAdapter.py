@@ -3,6 +3,7 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
+from src.polydb.json_safe import json_safe
 from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
 from ..types import JsonDict
@@ -56,7 +57,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             data_copy['RowKey'] = rk
             
             # Check size
-            data_bytes = json.dumps(data_copy).encode()
+            data_bytes = json.dumps(data_copy,default=json_safe).encode()
             data_size = len(data_bytes)
             
             if data_size > self.AZURE_TABLE_MAX_SIZE:

@@ -17,6 +17,7 @@ from .types import JsonDict, Lookup, ModelMeta
 from .audit.manager import AuditManager
 from .audit.context import AuditContext
 from .query import Operator, QueryBuilder
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,11 @@ class DatabaseFactory:
         # Redis cache (only if explicitly enabled + URL present)
         self._cache: Optional[RedisCacheEngine] = None
         self.cache_warmer: Optional[CacheWarmer] = None
+        try:
+            load_dotenv()
+        except Exception:
+            pass
+
         if enable_cache and use_redis_cache:
             redis_url = os.getenv("REDIS_CACHE_URL")
             if redis_url:
@@ -108,17 +114,28 @@ class DatabaseFactory:
         return model.__name__ if isinstance(model, type) else str(model)
 
     def _current_tenant_id(self) -> Optional[str]:
-        tenant = TenantContext.get_tenant()
-        return tenant.tenant_id if tenant else None
+        # Prefer TenantContext if present
+        try:
+            tenant = TenantContext.get_tenant()
+            if tenant and tenant.tenant_id:
+                return tenant.tenant_id
+        except Exception:
+            pass
+
+        # Fallback to AuditContext
+        return AuditContext.tenant_id.get()
 
     def _current_actor_id(self) -> Optional[str]:
         return AuditContext.actor_id.get()
 
     def _inject_tenant(self, data: JsonDict) -> JsonDict:
         tenant_id = self._current_tenant_id()
-        if tenant_id and "tenant_id" not in data:
-            data = dict(data)
-            data["tenant_id"] = tenant_id
+
+        if not tenant_id:
+            raise ValueError("Tenant ID is required but not set in AuditContext or TenantContext")
+
+        data = dict(data)
+        data.setdefault("tenant_id", tenant_id)
         return data
 
     def _inject_audit_fields(self, data: JsonDict, is_create: bool = False) -> JsonDict:
@@ -293,15 +310,17 @@ class DatabaseFactory:
         meta = self._meta(model)
         tenant_id = self._current_tenant_id()
         actor_id = self._current_actor_id()
-
         query = self._apply_soft_delete_filter(query if not include_deleted else None)
-
         # Multi-tenancy & RLS filters
         if self.tenant_enforcer:
             query = self.tenant_enforcer.enforce_read(model_name, query or {})
         if self.rls:
             query = self.rls.enforce_read(model_name, query or {})
-
+        # Inject tenant filter (mandatory isolation)
+        tenant_id = self._current_tenant_id()
+        if tenant_id:
+            query = dict(query or {})
+            query.setdefault("tenant_id", tenant_id)
         use_external_cache = self._enable_cache and self._cache and getattr(meta, "cache", False)
         encrypted_fields = getattr(meta, "encrypted_fields", [])
 
@@ -408,7 +427,11 @@ class DatabaseFactory:
             query = self.tenant_enforcer.enforce_read(model_name, query or {})
         if self.rls:
             query = self.rls.enforce_read(model_name, query or {})
-
+        # Inject tenant filter (mandatory isolation)
+        tenant_id = self._current_tenant_id()
+        if tenant_id:
+            query = dict(query or {})
+            query.setdefault("tenant_id", tenant_id)
         encrypted_fields = getattr(meta, "encrypted_fields", [])
 
         def _op() -> Tuple[List[JsonDict], Optional[str]]:
@@ -497,6 +520,9 @@ class DatabaseFactory:
             nonlocal after_plain, success
 
             if meta.storage == "sql" and meta.table:
+                if tenant_id:
+                    if isinstance(entity_id, dict):
+                        entity_id.setdefault("tenant_id", tenant_id)
                 result = self._sql.update(meta.table, entity_id, data)
             else:
                 model_type = self._model_type(model)

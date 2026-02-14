@@ -12,6 +12,8 @@ import os
 import threading
 from typing import Any, Dict, List
 
+from src.polydb.json_safe import json_safe
+
 
 class SQSAdapter(QueueAdapter):
     """AWS SQS with client reuse"""
@@ -45,7 +47,7 @@ class SQSAdapter(QueueAdapter):
                 self._initialize_client()
             if self._client:
                 response = self._client.send_message(
-                    QueueUrl=self.queue_url, MessageBody=json.dumps(message)
+                    QueueUrl=self.queue_url, MessageBody=json.dumps(message,default=json_safe)
                 )
                 return response["MessageId"]
             return ""

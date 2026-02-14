@@ -3,16 +3,14 @@
 Complete PolyDB usage example with all features
 """
 
-from polydb import (
-    DatabaseFactory,
-    polydb_model,
-    QueryBuilder,
-    Operator,
-    AuditContext,
-)
-
 
 # 1. Define models
+from polydb.audit.context import AuditContext
+from polydb.databaseFactory import DatabaseFactory
+from polydb.decorators import polydb_model
+from polydb.query import Operator, QueryBuilder
+
+
 @polydb_model
 class User:
     __polydb__ = {

@@ -64,7 +64,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
             data_copy['SK'] = rk
             
             # Check size
-            data_bytes = json.dumps(data_copy).encode()
+            data_bytes = json.dumps(data_copy,default=json_safe).encode()
             data_size = len(data_bytes)
             
             if data_size > self.DYNAMODB_MAX_SIZE:

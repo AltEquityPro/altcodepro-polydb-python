@@ -6,6 +6,8 @@ import os
 import threading
 from typing import Any, Dict, List
 
+from src.polydb.json_safe import json_safe
+
 class AzureQueueAdapter(QueueAdapter):
     """Azure Queue Storage with client reuse"""
 
@@ -36,7 +38,7 @@ class AzureQueueAdapter(QueueAdapter):
 
             if self._client:
                 queue_client = self._client.get_queue_client(queue_name)
-                response = queue_client.send_message(json.dumps(message))
+                response = queue_client.send_message(json.dumps(message,default=json_safe))
                 return response.id
             return ""
         except Exception as e:

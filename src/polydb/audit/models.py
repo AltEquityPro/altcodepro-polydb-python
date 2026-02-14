@@ -7,6 +7,8 @@ import uuid
 import hashlib
 import json
 
+from src.polydb.json_safe import json_safe
+
 
 @dataclass
 class AuditRecord:
@@ -80,7 +82,7 @@ class AuditRecord:
         )
 
         record.hash = hashlib.sha256(
-            json.dumps(asdict(record), sort_keys=True).encode()
+            json.dumps(asdict(record), sort_keys=True,default=json_safe).encode()
         ).hexdigest()
 
         return record
