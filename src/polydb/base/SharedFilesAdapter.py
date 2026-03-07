@@ -17,7 +17,7 @@ class SharedFilesAdapter(ABC):
         pass
 
     @abstractmethod
-    def read(self, path: str) -> bytes:
+    def read(self, path: str) -> bytes | None:
         """Read file"""
         pass
 

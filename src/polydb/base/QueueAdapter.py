@@ -22,6 +22,6 @@ class QueueAdapter(ABC):
         pass
 
     @abstractmethod
-    def delete(self, message_id: str, queue_name: str = "default") -> bool:
+    def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
         """Delete message from queue"""
         pass

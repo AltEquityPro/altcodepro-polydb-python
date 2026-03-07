@@ -1,0 +1,128 @@
+version: "3.9"
+
+# ─── Local cloud emulators for polydb integration tests ───────────────────────
+# Usage:  docker compose -f docker-compose.test.yml up -d
+#         (wait ~10 s for health-checks, then run pytest)
+#
+# Emulates every CloudProvider used in CloudDatabaseFactory:
+#   POSTGRESQL   → postgres:16
+#   MONGODB      → mongo:7
+#   GCP          → firebase-emulator (Firestore) + fake-gcs-server + pubsub-emulator
+#   AZURE        → azurite (Table + Blob + Queue + File)
+#   AWS          → localstack (DynamoDB + S3 + SQS + EFS-stub)
+#   VERCEL       → redis:7  (VercelKV uses Redis under the hood)
+#   REDIS CACHE  → redis:7  (separate instance on different port)
+
+services:
+
+  # ── PostgreSQL ───────────────────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: polydb
+      POSTGRES_PASSWORD: polydb
+      POSTGRES_DB: polydb_test
+    ports:
+      - "5433:5432"          # 5433 to avoid clashing with local Postgres
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U polydb -d polydb_test"]
+      interval: 3s
+      retries: 10
+
+  # ── MongoDB ──────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    environment:
+      MONGO_INITDB_DATABASE: polydb_test
+    ports:
+      - "27018:27017"        # 27018 to avoid clashing with local Mongo
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 3s
+      retries: 10
+
+  # ── Azure (Azurite) ──────────────────────────────────────────────────────────
+  azurite:
+    image: mcr.microsoft.com/azure-storage/azurite:latest
+    command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+    ports:
+      - "10000:10000"        # Blob
+      - "10001:10001"        # Queue
+      - "10002:10002"        # Table
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "10002"]
+      interval: 3s
+      retries: 10
+
+  # ── AWS (LocalStack) ─────────────────────────────────────────────────────────
+  localstack:
+    image: localstack/localstack:3
+    environment:
+      SERVICES: dynamodb,s3,sqs
+      DEFAULT_REGION: us-east-1
+      LOCALSTACK_HOST: localhost
+    ports:
+      - "4566:4566"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 5s
+      retries: 15
+
+  # ── GCP Firestore emulator ────────────────────────────────────────────────────
+  firestore:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: >
+      gcloud emulators firestore start
+        --host-port=0.0.0.0:8080
+        --project=polydb-test
+    ports:
+      - "8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080"]
+      interval: 5s
+      retries: 15
+
+  # ── GCP Pub/Sub emulator ──────────────────────────────────────────────────────
+  pubsub:
+    image: gcr.io/google.com/cloudsdktool/google-cloud-cli:emulators
+    command: >
+      gcloud beta emulators pubsub start
+        --host-port=0.0.0.0:8085
+        --project=polydb-test
+    ports:
+      - "8085:8085"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8085"]
+      interval: 5s
+      retries: 15
+
+  # ── GCP Object Storage (fake-gcs-server) ─────────────────────────────────────
+  fake-gcs:
+    image: fsouza/fake-gcs-server:latest
+    command: -scheme http -port 4443 -public-host localhost:4443
+    ports:
+      - "4443:4443"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4443/storage/v1/b"]
+      interval: 3s
+      retries: 10
+
+  # ── Vercel KV (Redis) ─────────────────────────────────────────────────────────
+  redis-vercel:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10
+
+  # ── Redis Cache (separate instance) ──────────────────────────────────────────
+  redis-cache:
+    image: redis:7-alpine
+    ports:
+      - "6381:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      retries: 10

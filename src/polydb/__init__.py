@@ -6,7 +6,7 @@ Full LINQ support, field-level audit, cache, soft delete, overflow storage
 
 __version__ = "2.2.2"
 
-from .factory import CloudDatabaseFactory
+from .cloudDatabaseFactory import CloudDatabaseFactory
 from .databaseFactory import DatabaseFactory
 from .models import CloudProvider, PartitionConfig
 from .decorators import polydb_model

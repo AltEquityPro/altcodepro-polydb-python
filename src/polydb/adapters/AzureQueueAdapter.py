@@ -1,63 +1,125 @@
 # src/polydb/adapters/AzureQueueAdapter.py
-from polydb.base.QueueAdapter import QueueAdapter
-from polydb.errors import ConnectionError, QueueError
-from polydb.retry import retry
+
 import os
 import threading
-from typing import Any, Dict, List
+import json
+from typing import Any, Dict, List, Optional
 
+from azure.storage.queue import QueueServiceClient, QueueClient
+from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
+
+from ..base.QueueAdapter import QueueAdapter
+from ..errors import ConnectionError, QueueError
+from ..retry import retry
 from ..json_safe import json_safe
 
-class AzureQueueAdapter(QueueAdapter):
-    """Azure Queue Storage with client reuse"""
 
-    def __init__(self):
+class AzureQueueAdapter(QueueAdapter):
+    """
+    Azure Queue Storage adapter.
+
+    Features
+    - Thread-safe initialization
+    - Automatic queue creation
+    - Client reuse
+    - Retry support
+    """
+
+    def __init__(self, connection_string: str = ""):
         super().__init__()
-        self.connection_string = os.getenv("AZURE_STORAGE_CONNECTION_STRING") or ""
-        self._client = None
+
+        self.connection_string = connection_string or os.getenv("AZURE_STORAGE_CONNECTION_STRING")
+
+        if not self.connection_string:
+            raise ConnectionError("AZURE_STORAGE_CONNECTION_STRING is not configured")
+
+        self._client: Optional[QueueServiceClient] = None
+        self._queues: Dict[str, QueueClient] = {}
+
         self._lock = threading.Lock()
+
         self._initialize_client()
 
-    def _initialize_client(self):
-        """Initialize Azure Queue Storage client once"""
+    def _initialize_client(self) -> None:
+        """Initialize Azure Queue client"""
         try:
-            from azure.storage.queue import QueueServiceClient
-
             with self._lock:
-                if not self._client:
-                    self._client = QueueServiceClient.from_connection_string(self.connection_string)
-                    self.logger.info("Initialized Azure Queue Storage client")
+                if self._client is not None:
+                    return
+                if not self.connection_string:
+                    raise ConnectionError("AZURE_STORAGE_CONNECTION_STRING is not configured")
+                self._client = QueueServiceClient.from_connection_string(self.connection_string)
+
+                self.logger.info("Initialized Azure Queue Storage client")
+
         except Exception as e:
-            raise ConnectionError(f"Failed to initialize Azure Queue Storage: {str(e)}")
+            raise ConnectionError(f"Failed to initialize Azure Queue Storage: {e}")
+
+    def _get_queue(self, queue_name: str) -> QueueClient:
+        """Get or create queue client"""
+        if self._client is None:
+            raise ConnectionError("Azure Queue client not initialized")
+
+        if queue_name not in self._queues:
+            queue_client = self._client.get_queue_client(queue_name)
+
+            try:
+                queue_client.create_queue()
+            except ResourceExistsError:
+                pass
+
+            self._queues[queue_name] = queue_client
+
+        return self._queues[queue_name]
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
     def send(self, message: Dict[str, Any], queue_name: str = "default") -> str:
         """Send message to queue"""
         try:
-            import json
+            queue_client = self._get_queue(queue_name)
 
-            if self._client:
-                queue_client = self._client.get_queue_client(queue_name)
-                response = queue_client.send_message(json.dumps(message,default=json_safe))
-                return response.id
-            return ""
+            response = queue_client.send_message(json.dumps(message, default=json_safe))
+
+            return response.id
+
         except Exception as e:
-            raise QueueError(f"Azure Queue send failed: {str(e)}")
+            raise QueueError(f"Azure Queue send failed: {e}")
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
     def receive(self, queue_name: str = "default", max_messages: int = 1) -> List[Dict[str, Any]]:
-        """Receive messages from queue"""
+        """Receive messages"""
         try:
-            import json
+            queue_client = self._get_queue(queue_name)
 
-            if self._client:
-                queue_client = self._client.get_queue_client(queue_name)
-                messages = queue_client.receive_messages(max_messages=max_messages)
-                return [json.loads(msg.content) for msg in messages]
-            return []
+            messages = queue_client.receive_messages(max_messages=max_messages)
+
+            results = []
+
+            for msg in messages:
+                payload = json.loads(msg.content)
+                results.append(
+                    {
+                        "id": msg.id,
+                        "pop_receipt": msg.pop_receipt,
+                        "body": payload,
+                    }
+                )
+
+            return results
+
         except Exception as e:
-            raise QueueError(f"Azure Queue receive failed: {str(e)}")
+            raise QueueError(f"Azure Queue receive failed: {e}")
 
-    def delete(self, message_id: str, queue_name: str = "default") -> bool:
-        """Delete message from queue (requires receipt handle)"""
-        return True
+    def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
+        """Delete message from queue"""
+        try:
+            queue_client = self._get_queue(queue_name)
+
+            queue_client.delete_message(message_id, pop_receipt)
+
+            return True
+
+        except ResourceNotFoundError:
+            return False
+        except Exception as e:
+            raise QueueError(f"Azure Queue delete failed: {e}")

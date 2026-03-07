@@ -1,4 +1,5 @@
-from polydb.utils import setup_logger
+from ..errors import StorageError
+from ..utils import setup_logger
 from abc import ABC, abstractmethod
 from typing import List, Optional
 
@@ -40,3 +41,23 @@ class ObjectStorageAdapter(ABC):
     def list(self, prefix: str = "") -> List[str]:
         """List objects with prefix"""
         pass
+
+    def upload(self, key: str, data: bytes, **kwargs) -> str:
+        """
+        Alias for put().
+        Accepts kwargs so callers can pass optimize/media_type without breaking.
+        """
+        return self.put(key, data, **kwargs)
+
+    def download(self, key: str) -> bytes:
+        """
+        Alias for get() but guarantees bytes or raises.
+        This matches how your tests expect download() to behave.
+        """
+        if not key:
+            raise StorageError("Key cannot be empty")
+
+        data = self.get(key)
+        if data is None:
+            raise StorageError(f"Object not found: {key}")
+        return data

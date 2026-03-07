@@ -5,7 +5,7 @@ import threading
 from typing import Optional, Dict, Any
 
 from .models import AuditRecord
-from ..factory import CloudDatabaseFactory
+from ..cloudDatabaseFactory import CloudDatabaseFactory
 
 
 class AuditStorage:

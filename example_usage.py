@@ -54,11 +54,14 @@ AuditContext.set(
 
 
 # 4. CRUD operations with auto-audit and tenant injection
-user = db.create(User, {
-    "name": "John Doe",
-    "email": "john@example.com",
-    "role": "admin",
-})
+user = db.create(
+    User,
+    {
+        "name": "John Doe",
+        "email": "john@example.com",
+        "role": "admin",
+    },
+)
 # Auto-injected: tenant_id, created_at, created_by, updated_at, updated_by
 
 
@@ -77,29 +80,24 @@ admins = db.query_linq(User, query)
 
 
 # 6. Count queries
-count_query = (
-    QueryBuilder()
-    .where("role", Operator.EQ, "admin")
-    .count()
-)
+count_query = QueryBuilder().where("role", Operator.EQ, "admin").count()
 
 admin_count = db.query_linq(User, count_query)
 
 
 # 7. Distinct queries
-distinct_query = (
-    QueryBuilder()
-    .select("role")
-    .distinct_on()
-)
-
+distinct_query = QueryBuilder().select("role").distinct()
 roles = db.query_linq(User, distinct_query)
 
 
 # 8. Update with field-level audit
-updated_user = db.update(User, user["id"], {
-    "email": "newemail@example.com",
-})
+updated_user = db.update(
+    User,
+    user["id"],
+    {
+        "email": "newemail@example.com",
+    },
+)
 # Audit log shows: changed_fields = ["email", "updated_at", "updated_by"]
 
 
@@ -117,12 +115,15 @@ users = db.read(User, {"role": "admin"}, limit=10)
 # Cached for 600 seconds (from model cache_ttl)
 
 # 13. NoSQL with overflow storage (automatic)
-large_product = db.create(Product, {
-    "category": "electronics",
-    "product_id": "prod_123",
-    "name": "Large Dataset Product",
-    "data": {"key": "value"} * 100000,  # >1MB # type: ignore
-})
+large_product = db.create(
+    Product,
+    {
+        "category": "electronics",
+        "product_id": "prod_123",
+        "name": "Large Dataset Product",
+        "data": {"key": "value"} * 100000,  # >1MB # type: ignore
+    },
+)
 # Automatically stored in blob storage, transparent retrieval
 
 
@@ -141,12 +142,15 @@ products = db.query_linq(Product, complex_query)
 
 
 # 15. Upsert (insert or update)
-product = db.upsert(Product, {
-    "category": "electronics",
-    "product_id": "prod_123",
-    "name": "Updated Product",
-    "price": 299.99,
-})
+product = db.upsert(
+    Product,
+    {
+        "category": "electronics",
+        "product_id": "prod_123",
+        "name": "Updated Product",
+        "price": 299.99,
+    },
+)
 
 
 # 16. Include deleted records
@@ -163,10 +167,13 @@ print(f"Audit chain valid: {is_valid}")
 
 # 18. Cache invalidation
 from polydb.cache import CacheStrategy
-def bulk_insert(cursor):
-    cursor.execute("INSERT INTO users (name, email) VALUES (%s, %s)", ("Alice", "alice@example.com"))
-    cursor.execute("INSERT INTO users (name, email) VALUES (%s, %s)", ("Bob", "bob@example.com"))
 
+
+def bulk_insert(cursor):
+    cursor.execute(
+        "INSERT INTO users (name, email) VALUES (%s, %s)", ("Alice", "alice@example.com")
+    )
+    cursor.execute("INSERT INTO users (name, email) VALUES (%s, %s)", ("Bob", "bob@example.com"))
 
 
 # 20. Read one
@@ -175,10 +182,7 @@ user = db.read_one(User, {"email": "john@example.com"})
 
 # 21. Complex LINQ with grouping (SQL)
 group_query = (
-    QueryBuilder()
-    .select("role")
-    .where("created_at", Operator.GT, "2025-01-01")
-    .group_by("role")
+    QueryBuilder().select("role").where("created_at", Operator.GT, "2025-01-01").group_by("role")
 )
 
 grouped = db.query_linq(User, group_query)
