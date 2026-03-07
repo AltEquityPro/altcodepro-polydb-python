@@ -17,6 +17,7 @@ class CloudProvider(Enum):
     MONGODB = "mongodb"
     S3_COMPATIBLE = "s3_compatible"
     POSTGRESQL = "postgresql"
+    BLOCKCHAIN = "blockchain"
 
 
 @dataclass

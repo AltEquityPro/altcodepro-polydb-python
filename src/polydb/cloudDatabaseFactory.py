@@ -61,6 +61,10 @@ class CloudDatabaseFactory:
             from .adapters.VercelKVAdapter import VercelKVAdapter
 
             return VercelKVAdapter(partition_config)
+        elif self.provider == CloudProvider.BLOCKCHAIN:
+            from .adapters.BlockchainKVAdapter import BlockchainKVAdapter
+
+            return BlockchainKVAdapter()
         else:
             from .adapters.MongoDBAdapter import MongoDBAdapter
 
@@ -83,6 +87,10 @@ class CloudDatabaseFactory:
             from .adapters.VercelBlobAdapter import VercelBlobAdapter
 
             return VercelBlobAdapter()
+        elif self.provider == CloudProvider.BLOCKCHAIN:
+            from .adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
+
+            return BlockchainBlobAdapter()
         else:
             from .adapters.S3CompatibleAdapter import S3CompatibleAdapter
 
@@ -101,6 +109,10 @@ class CloudDatabaseFactory:
             from .adapters.GCPPubSubAdapter import GCPPubSubAdapter
 
             return GCPPubSubAdapter()
+        elif self.provider == CloudProvider.BLOCKCHAIN:
+            from .adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
+
+            return BlockchainQueueAdapter()
         elif self.provider == CloudProvider.VERCEL:
             from .adapters.VercelQueueAdapter import VercelQueueAdapter
 

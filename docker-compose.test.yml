@@ -14,7 +14,6 @@ version: "3.9"
 #   REDIS CACHE  → redis:7  (separate instance on different port)
 
 services:
-
   # ── PostgreSQL ───────────────────────────────────────────────────────────────
   postgres:
     image: postgres:16-alpine
@@ -23,7 +22,7 @@ services:
       POSTGRES_PASSWORD: polydb
       POSTGRES_DB: polydb_test
     ports:
-      - "5433:5432"          # 5433 to avoid clashing with local Postgres
+      - "5433:5432" # 5433 to avoid clashing with local Postgres
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U polydb -d polydb_test"]
       interval: 3s
@@ -35,7 +34,7 @@ services:
     environment:
       MONGO_INITDB_DATABASE: polydb_test
     ports:
-      - "27018:27017"        # 27018 to avoid clashing with local Mongo
+      - "27018:27017" # 27018 to avoid clashing with local Mongo
     healthcheck:
       test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
       interval: 3s
@@ -46,9 +45,9 @@ services:
     image: mcr.microsoft.com/azure-storage/azurite:latest
     command: azurite --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
     ports:
-      - "10000:10000"        # Blob
-      - "10001:10001"        # Queue
-      - "10002:10002"        # Table
+      - "10000:10000" # Blob
+      - "10001:10001" # Queue
+      - "10002:10002" # Table
     healthcheck:
       test: ["CMD", "nc", "-z", "localhost", "10002"]
       interval: 3s
@@ -125,4 +124,35 @@ services:
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 3s
+      retries: 10
+    # ── Blockchain (Ganache) ─────────────────────────────────────────────
+  blockchain:
+    image: trufflesuite/ganache:latest
+    command: >
+      --chain.chainId 1337
+      --chain.networkId 1337
+      --wallet.mnemonic "test test test test test test test test test test test junk"
+      --wallet.totalAccounts 20
+      --wallet.defaultBalance 1000
+      --miner.defaultGasPrice 0
+      --server.host 0.0.0.0
+      --server.port 8545
+    ports:
+      - "8545:8545"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "8545"]
+      interval: 3s
+      retries: 10
+
+  # ── IPFS ─────────────────────────────────────────────────────────────
+  ipfs:
+    image: ipfs/kubo:latest
+    environment:
+      IPFS_PROFILE: server
+    ports:
+      - "5001:5001"
+      - "8081:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5001/api/v0/version"]
+      interval: 5s
       retries: 10
