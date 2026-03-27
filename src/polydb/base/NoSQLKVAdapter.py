@@ -6,6 +6,7 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING, cast
 
+
 from ..json_safe import json_safe
 
 from ..errors import NoSQLError, StorageError
@@ -20,7 +21,10 @@ if TYPE_CHECKING:
 class NoSQLKVAdapter:
     """Base with auto-overflow and LINQ support"""
 
-    def __init__(self, partition_config: Optional[PartitionConfig] = None):
+    def __init__(
+        self,
+        partition_config: Optional[PartitionConfig] = None,
+    ):
         from ..utils import setup_logger
 
         self.logger = setup_logger(self.__class__.__name__)

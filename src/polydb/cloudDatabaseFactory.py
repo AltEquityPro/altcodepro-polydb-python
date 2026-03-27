@@ -4,6 +4,13 @@ import os
 import threading
 from typing import Dict, List, Optional
 
+from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
+from .adapters.AzureBlobStorageAdapter import AzureBlobStorageAdapter
+from .adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
+from .adapters.GCPStorageAdapter import GCPStorageAdapter
+from .adapters.S3CompatibleAdapter import S3CompatibleAdapter
+from .adapters.VercelBlobAdapter import VercelBlobAdapter
+
 from .models import (
     AzureStorageConfig,
     BlockchainStorageConfig,
@@ -46,7 +53,15 @@ class CloudDatabaseFactory:
             for cfg in storage_configs:
                 self.configs[cfg.name] = cfg
 
-        self.instances: Dict[str, object] = {}
+        self.instances: Dict[
+            str,
+            PostgreSQLAdapter
+            | AzureBlobStorageAdapter
+            | S3CompatibleAdapter
+            | GCPStorageAdapter
+            | VercelBlobAdapter
+            | BlockchainBlobAdapter,
+        ] = {}
         self._lock = threading.Lock()
 
         self.logger.info(f"Factory initialized (default provider={self.provider.value})")
@@ -76,7 +91,16 @@ class CloudDatabaseFactory:
     # --------------------------------------------------------
     # OBJECT STORAGE
     # --------------------------------------------------------
-    def get_object_storage(self, name: str = "default"):
+    def get_object_storage(
+        self, name: str = "default"
+    ) -> (
+        PostgreSQLAdapter
+        | AzureBlobStorageAdapter
+        | S3CompatibleAdapter
+        | GCPStorageAdapter
+        | VercelBlobAdapter
+        | BlockchainBlobAdapter
+    ):
         with self._lock:
             if name in self.instances:
                 return self.instances[name]
