@@ -30,11 +30,6 @@ _DEFAULT_RETRY = retry(
 )
 
 
-# ---------------------------------------------------------------------------
-# Engine descriptor — one per registered SQL or NoSQL engine
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class EngineConfig:
     """
@@ -81,11 +76,6 @@ class EngineConfig:
         return self._nosql
 
 
-# ---------------------------------------------------------------------------
-# Per-call override — passed into any CRUD method via `engine_override=`
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class EngineOverride:
     """
@@ -103,21 +93,11 @@ class EngineOverride:
     force_nosql: bool = False
 
 
-# ---------------------------------------------------------------------------
-# Internal resolved pair
-# ---------------------------------------------------------------------------
-
-
 @dataclass
 class _ResolvedAdapters:
     sql: Any
     nosql: Any
     engine_name: str
-
-
-# ---------------------------------------------------------------------------
-# DatabaseFactory
-# ---------------------------------------------------------------------------
 
 
 class DatabaseFactory:
@@ -1102,3 +1082,218 @@ class DatabaseFactory:
             return result
         except Exception:
             raise
+
+    # -----------------------------------------------------------------------
+    # OBJECT STORAGE (BLOB)
+    # -----------------------------------------------------------------------
+
+    def upload_blob(
+        self,
+        key: str,
+        data: bytes,
+        *,
+        file_name: Optional[str] = None,
+        media_type: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        storage_name: str = "azure",
+    ) -> str:
+        """
+        Upload blob and return URL
+        """
+        factory = self._engines[0].cloud_factory
+        storage = factory.get_object_storage(storage_name)
+
+        return storage.put(
+            key=key,
+            data=data,
+            fileName=file_name or key,
+            optimize=True,
+            media_type=media_type,
+            metadata=metadata or {},
+        )
+
+    def download_blob(
+        self,
+        key: str,
+        *,
+        storage_name: str = "azure",
+    ) -> Optional[bytes]:
+        factory = self._engines[0].cloud_factory
+        storage = factory.get_object_storage(storage_name)
+
+        return storage.get(key)
+
+    def delete_blob(
+        self,
+        key: str,
+        *,
+        storage_name: str = "azure",
+    ) -> bool:
+        factory = self._engines[0].cloud_factory
+        storage = factory.get_object_storage(storage_name)
+
+        return storage.delete(key)
+
+    def list_blob(
+        self,
+        prefix: str = "",
+        *,
+        storage_name: str = "azure",
+    ) -> List[str]:
+        factory = self._engines[0].cloud_factory
+        storage = factory.get_object_storage(storage_name)
+
+        return storage.list(prefix)
+
+    # -----------------------------------------------------------------------
+    # QUEUE
+    # -----------------------------------------------------------------------
+
+    def send_queue(
+        self,
+        message: Dict[str, Any],
+        *,
+        queue_name: str = "default",
+        adapter_name: str = "azure_queue",
+    ) -> str:
+        factory = self._engines[0].cloud_factory
+        queue = factory.get_queue(adapter_name)
+
+        return queue.send(message=message, queue_name=queue_name)
+
+    def receive_queue(
+        self,
+        *,
+        queue_name: str = "default",
+        max_messages: int = 10,
+        adapter_name: str = "azure_queue",
+    ) -> List[Dict[str, Any]]:
+        factory = self._engines[0].cloud_factory
+        queue = factory.get_queue(adapter_name)
+
+        return queue.receive(queue_name=queue_name, max_messages=max_messages)
+
+    def ack_queue(
+        self,
+        ack_id: str,
+        *,
+        queue_name: str = "default",
+        adapter_name: str = "azure_queue",
+    ) -> bool:
+        factory = self._engines[0].cloud_factory
+        queue = factory.get_queue(adapter_name)
+
+        if hasattr(queue, "ack"):
+            return queue.ack(ack_id, queue_name)
+
+        return queue.delete(ack_id, queue_name)
+
+    def delete_queue(
+        self,
+        message_id: str,
+        *,
+        queue_name: str = "default",
+        pop_receipt: Optional[str] = None,
+        adapter_name: str = "azure_queue",
+    ) -> bool:
+        factory = self._engines[0].cloud_factory
+        queue = factory.get_queue(adapter_name)
+
+        # Prefer receipt_handle / pop_receipt if available
+        if pop_receipt:
+            return queue.delete(message_id, queue_name, pop_receipt)
+
+        # fallback (SQS / Vercel / Blockchain)
+        return queue.delete(message_id, queue_name)
+
+    # -----------------------------------------------------------------------
+    # FILE STORAGE
+    # -----------------------------------------------------------------------
+
+    def write_file(
+        self,
+        path: str,
+        data: bytes | str,
+        *,
+        adapter_name: str = "files",
+    ) -> bool:
+        factory = self._engines[0].cloud_factory
+        files: Any = factory.get_files(adapter_name)
+
+        if isinstance(data, str):
+            data = data.encode()
+
+        return files.write(path, data)
+
+    def read_file(
+        self,
+        path: str,
+        *,
+        adapter_name: str = "files",
+    ) -> Optional[bytes]:
+        factory = self._engines[0].cloud_factory
+        files: Any = factory.get_files(adapter_name)
+
+        return files.read(path)
+
+    def delete_file(
+        self,
+        path: str,
+        *,
+        adapter_name: str = "files",
+    ) -> bool:
+        factory = self._engines[0].cloud_factory
+        files = factory.get_files(adapter_name)
+
+        return files.delete(path)
+
+    def list_files(
+        self,
+        directory: str = "",
+        *,
+        adapter_name: str = "files",
+    ) -> List[str]:
+        factory = self._engines[0].cloud_factory
+        files = factory.get_files(adapter_name)
+
+        return files.list(directory)
+
+        # -----------------------------------------------------------------------
+
+    # CACHE
+    # -----------------------------------------------------------------------
+
+    def set_cache(
+        self,
+        model: str,
+        key: Any,
+        value: Any,
+        ttl: int = 300,
+    ) -> None:
+        if not self._cache:
+            return
+
+        self._cache.set(model, key, value, ttl)
+
+    def get_cache(
+        self,
+        model: str,
+        key: Any,
+    ) -> Optional[Any]:
+        if not self._cache:
+            return None
+
+        return self._cache.get(model, key)
+
+    def invalidate_cache(
+        self,
+        model: str,
+        key: Optional[Any] = None,
+    ) -> None:
+        if not self._cache:
+            return
+
+        if key:
+            self._cache.invalidate(model, key)
+        else:
+            self._cache.clear()

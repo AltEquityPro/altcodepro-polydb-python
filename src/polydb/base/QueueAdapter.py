@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 class QueueAdapter(ABC):
     """Base class for Queue/Message services"""
 
-    def __init__(self):
+    def __init__(self, connection_string: str = ""):
         self.logger = setup_logger(self.__class__.__name__)
 
     @abstractmethod

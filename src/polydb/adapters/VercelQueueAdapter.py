@@ -2,6 +2,8 @@ import os
 import json
 import requests
 from typing import Dict, Any, List
+
+from ..base.QueueAdapter import QueueAdapter
 from ..errors import QueueError
 from ..retry import retry
 
@@ -32,7 +34,7 @@ class VercelQueueAdapter:
             raise QueueError(f"Vercel queue send failed: {e}")
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
-    def get_queue(self, queue_name: str = "default", max_messages: int = 1) -> List[Dict]:
+    def receive(self, queue_name: str = "default", max_messages: int = 1) -> List[Dict]:
 
         try:
 
@@ -57,5 +59,22 @@ class VercelQueueAdapter:
         except Exception as e:
             raise QueueError(f"Vercel queue receive failed: {e}")
 
-    def delete(self, message_id: str, queue_name: str = "default") -> bool:
+    def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
+        return True
+
+    # ---------------------------------------------------------
+    # ACK (same as delete for compatibility)
+    # ---------------------------------------------------------
+    def ack(self, ack_id: str, queue_name: str = "default") -> bool:
+        """
+        ACK for Vercel Queue.
+
+        Since Redis Streams via Vercel KV REST API does not support
+        explicit ACK without consumer groups, this is treated as no-op.
+
+        Exists for interface consistency.
+        """
+        if not ack_id:
+            raise QueueError("ack_id is required")
+
         return True

@@ -9,6 +9,8 @@ from web3 import Web3
 from web3.middleware import ExtraDataToPOAMiddleware
 from dotenv import load_dotenv
 
+from ..errors import QueueError
+
 logger = logging.getLogger(__name__)
 
 
@@ -88,14 +90,16 @@ class BlockchainQueueAdapter:
 
         return tx_hash.hex()
 
-    def send(self, message: Dict[str, Any], queue_name: str = "default"):
+    def send(self, message: Dict[str, Any], queue_name: str = "default") -> str:
         payload = json.dumps(message)
         fn = self.contract.functions.publish(queue_name, payload)
         tx_hash = self._send_tx(fn)
 
-        return {"tx": tx_hash}
+        return tx_hash
 
-    def receive(self, queue_name: str = "default", from_block="latest") -> List[Dict]:
+    def receive(
+        self, queue_name: str = "default", max_messages: int = 1, from_block="latest"
+    ) -> List[Dict]:
         event_filter = self.contract.events.MessagePublished.create_filter(fromBlock=from_block)
 
         events = event_filter.get_all_entries()
@@ -108,9 +112,23 @@ class BlockchainQueueAdapter:
 
         return messages
 
-    def delete(self, message_id):
+    def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
         """
         Blockchain queues cannot delete events.
         This method exists for interface compatibility.
         """
-        return {"deleted": False}
+        return False
+
+    def ack(self, ack_id: str, queue_name: str = "default") -> bool:
+        """
+        ACK for Vercel Queue.
+
+        Since Redis Streams via Vercel KV REST API does not support
+        explicit ACK without consumer groups, this is treated as no-op.
+
+        Exists for interface consistency.
+        """
+        if not ack_id:
+            raise QueueError("ack_id is required")
+
+        return True

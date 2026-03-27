@@ -87,7 +87,7 @@ class SQSAdapter(QueueAdapter):
     # ---------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
-    def send(self, message: Any, queue_name: str = "default") -> str:
+    def send(self, message: Dict[str, Any], queue_name: str = "default") -> str:
         """Send message to queue"""
         try:
             if not self._client:
@@ -161,3 +161,19 @@ class SQSAdapter(QueueAdapter):
 
         except Exception as e:
             raise QueueError(f"SQS delete failed: {e}")
+
+    # ---------------------------------------------------------
+    # ACK (SQS = delete using receipt_handle)
+    # ---------------------------------------------------------
+    def ack(self, ack_id: str, queue_name: str = "default") -> bool:
+        """
+        ACK message in SQS.
+
+        ack_id = receipt_handle (NOT message_id)
+
+        This maps to delete operation.
+        """
+        if not ack_id:
+            raise QueueError("ack_id (receipt_handle) is required for SQS ack")
+
+        return self.delete(ack_id, queue_name=queue_name)

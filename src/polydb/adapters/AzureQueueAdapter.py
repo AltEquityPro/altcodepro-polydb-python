@@ -123,3 +123,30 @@ class AzureQueueAdapter(QueueAdapter):
             return False
         except Exception as e:
             raise QueueError(f"Azure Queue delete failed: {e}")
+
+    def ack(
+        self,
+        pop_receipt: str,
+        queue_name: str = "default",
+        message_id: Optional[str] = None,
+    ) -> bool:
+        """
+        Acknowledge (delete) a message.
+
+        Azure Queue requires BOTH:
+        - message_id
+        - pop_receipt
+
+        Preferred usage:
+            ack(pop_receipt=..., message_id=...)
+
+        If message_id is not provided, this will fail safely.
+        """
+        if not message_id:
+            raise QueueError("AzureQueueAdapter.ack requires message_id")
+
+        return self.delete(
+            message_id=message_id,
+            queue_name=queue_name,
+            pop_receipt=pop_receipt,
+        )

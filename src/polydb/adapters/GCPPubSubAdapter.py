@@ -119,7 +119,7 @@ class GCPPubSubAdapter(QueueAdapter):
     # -------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
-    def send(self, message: JsonLike, queue_name: str = "default") -> str:
+    def send(self, message: Dict[str, Any], queue_name: str = "default") -> str:
         """
         Publish message to Pub/Sub.
         Tests send a string; production may send dict.
@@ -212,6 +212,28 @@ class GCPPubSubAdapter(QueueAdapter):
         except Exception as e:
             raise QueueError(f"Pub/Sub delete failed: {e}")
 
-    # Alias that your tests want
     def ack(self, ack_id: str, queue_name: str = "default") -> bool:
-        return self.delete(message_id="", queue_name=queue_name, pop_receipt=ack_id)
+        """
+        Explicit ACK for Pub/Sub.
+
+        Preferred usage:
+            ack(ack_id=msg["receipt_handle"])
+
+        Internally maps to acknowledge().
+        """
+        if not ack_id:
+            raise QueueError("ack_id is required for Pub/Sub ack")
+
+        try:
+            if not self._subscriber:
+                raise ConnectionError("Pub/Sub subscriber not initialized")
+
+            _, subscription = self._resolve_names(queue_name)
+            sub_path = self._subscription_path(subscription)
+
+            self._subscriber.acknowledge(request={"subscription": sub_path, "ack_ids": [ack_id]})
+
+            return True
+
+        except Exception as e:
+            raise QueueError(f"Pub/Sub ack failed: {e}")

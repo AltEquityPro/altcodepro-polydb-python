@@ -183,10 +183,8 @@ DatabaseFactory
 FILE: src/polydb/cloudDatabaseFactory.py
 
 CloudDatabaseFactory
+  ├─ get_object_storage(name) -> PostgreSQLAdapter | AzureBlobStorageAdapter | S3CompatibleAdapter | GCPStorageAdapter | VercelBlobAdapter | BlockchainBlobAdapter
   ├─ get_nosql_kv(partition_config)
-  ├─ get_object_storage()
-  ├─ get_queue()
-  ├─ get_shared_files()
   ├─ get_sql()
 
 
@@ -232,12 +230,9 @@ EFSAdapter
 FILE: src/polydb/adapters/VercelBlobAdapter.py
 
 VercelBlobAdapter
-  ├─ put(key, data) -> str
-  ├─ get(key) -> bytes
+  ├─ get(key) -> bytes | None
   ├─ delete(key) -> bool
   ├─ list(prefix) -> List[str]
-  ├─ upload(key, data) -> str
-  ├─ download(key) -> bytes
 
 
 FILE: src/polydb/adapters/AzureFileStorageAdapter.py
@@ -313,9 +308,9 @@ AzureQueueAdapter
 FILE: src/polydb/adapters/BlockchainBlobAdapter.py
 
 BlockchainBlobAdapter
-  ├─ put(key, data) -> str
-  ├─ get(cid) -> bytes
-  ├─ delete(cid)
+  ├─ get(key) -> bytes
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
 
 
 FILE: src/polydb/adapters/S3Adapter.py
@@ -406,7 +401,7 @@ AuditManager
 FILE: src/polydb/base/ObjectStorageAdapter.py
 
 ObjectStorageAdapter
-  ├─ put(key, data, optimize, media_type) -> str
+  ├─ put(key, data, fileName, optimize, media_type, metadata) -> str
   ├─ get(key) -> bytes
   ├─ delete(key) -> bool
   ├─ list(prefix) -> List[str]

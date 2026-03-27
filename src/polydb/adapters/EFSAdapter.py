@@ -5,12 +5,13 @@ from polydb.errors import StorageError
 import os
 from typing import List
 
+
 class EFSAdapter(SharedFilesAdapter):
     """AWS EFS (mounted filesystem)"""
 
-    def __init__(self):
+    def __init__(self, mount_point: str):
         super().__init__()
-        self.mount_point = os.getenv("EFS_MOUNT_POINT", "/mnt/efs")
+        self.mount_point = mount_point or os.getenv("EFS_MOUNT_POINT", "/mnt/efs")
 
     def write(self, path: str, data: bytes) -> bool:
         """Write file"""

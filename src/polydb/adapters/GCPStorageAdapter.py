@@ -26,14 +26,13 @@ class GCPStorageAdapter(ObjectStorageAdapter):
     - Structured logging
     """
 
-    def __init__(self, bucket_name: Optional[str] = None):
+    def __init__(self, project_id: str, endpoint: Optional[str], bucket_name: Optional[str] = None):
         super().__init__()
 
         self.bucket_name: str = bucket_name or os.getenv("GCS_BUCKET_NAME", "default")
-        self.project_id: str = os.getenv("GOOGLE_CLOUD_PROJECT", "polydb-test")
+        self.project_id: str = project_id or os.getenv("GOOGLE_CLOUD_PROJECT", "polydb-test")
 
-        # Emulator support
-        self._endpoint: Optional[str] = os.getenv("GCS_ENDPOINT")
+        self._endpoint: Optional[str] = endpoint or os.getenv("GCS_ENDPOINT")
 
         self._client: Optional[storage.Client] = None
         self._bucket: Optional[storage.Bucket] = None
