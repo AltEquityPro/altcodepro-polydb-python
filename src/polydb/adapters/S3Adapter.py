@@ -6,9 +6,10 @@ S3 adapter (AWS + LocalStack compatible)
 
 from __future__ import annotations
 
+import mimetypes
 import os
 import threading
-from typing import Any, List
+from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
@@ -101,23 +102,70 @@ class S3Adapter(ObjectStorageAdapter):
     # ---------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def _put_raw(self, key: str, data: bytes) -> str:
-        """Upload object"""
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        """Upload object to S3-compatible storage with metadata and media type"""
         try:
             if not self._client:
                 self._initialize_client()
 
-            self._client.put_object(
+            # --------------------------------------------------
+            # Resolve filename
+            # --------------------------------------------------
+            filename = fileName or os.path.basename(key)
+
+            # --------------------------------------------------
+            # Ensure extension from media_type
+            # --------------------------------------------------
+            if media_type:
+                ext = mimetypes.guess_extension(media_type) or ""
+                if ext and not filename.lower().endswith(ext):
+                    filename += ext
+
+            # --------------------------------------------------
+            # Final key
+            # --------------------------------------------------
+            blob_key = f"{key.rstrip('/')}/{filename}" if fileName else key
+
+            # --------------------------------------------------
+            # Metadata (string only)
+            # --------------------------------------------------
+            safe_metadata = {k: str(v) for k, v in (metadata or {}).items()}
+            safe_metadata["filename"] = filename
+
+            # --------------------------------------------------
+            # Upload
+            # --------------------------------------------------
+            self._client.put_object(  # type: ignore
                 Bucket=self.bucket_name,
-                Key=key,
+                Key=blob_key,
                 Body=data,
+                ContentType=media_type or "application/octet-stream",
+                Metadata=safe_metadata,
             )
 
-            self.logger.debug(f"S3 uploaded: {key}")
-            return key
+            self.logger.debug(f"S3 uploaded: {blob_key}, type={media_type}")
+
+            # --------------------------------------------------
+            # Return URL
+            # --------------------------------------------------
+            if self.endpoint_url:
+                # MinIO / Spaces / custom endpoint
+                url = f"{self.endpoint_url.rstrip('/')}/{self.bucket_name}/{blob_key}"
+            else:
+                # AWS S3 default
+                url = f"https://{self.bucket_name}.s3.amazonaws.com/{blob_key}"
+
+            return url
 
         except Exception as e:
-            raise StorageError(f"S3 put failed: {e}")
+            raise StorageError(f"S3-compatible put failed: {str(e)}")
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
     def get(self, key: str) -> bytes | None:

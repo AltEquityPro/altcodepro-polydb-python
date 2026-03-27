@@ -1,7 +1,7 @@
 from ..errors import StorageError
 from ..utils import setup_logger
 from abc import ABC, abstractmethod
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 
 class ObjectStorageAdapter(ABC):
@@ -11,19 +11,34 @@ class ObjectStorageAdapter(ABC):
         self.logger = setup_logger(self.__class__.__name__)
 
     def put(
-        self, key: str, data: bytes, optimize: bool = True, media_type: Optional[str] = None
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        optimize: bool = True,
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
     ) -> str:
         """Store object with optional optimization"""
         if optimize and media_type:
             data = self._optimize_media(data, media_type)
-        return self._put_raw(key, data)
+        return self._put_raw(
+            key=key, data=data, fileName=fileName, media_type=media_type, metadata=metadata
+        )
 
     def _optimize_media(self, data: bytes, media_type: str) -> bytes:
         """Optimize images and videos - placeholder for implementation"""
         return data
 
     @abstractmethod
-    def _put_raw(self, key: str, data: bytes) -> str:
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
         """Provider-specific put"""
         pass
 

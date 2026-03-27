@@ -1,0 +1,444 @@
+
+FILE: src/polydb/query.py
+
+QueryBuilder
+  ├─ where(field, operator, value) -> 'QueryBuilder'
+  ├─ order_by(field, descending) -> QueryBuilder
+  ├─ skip(count) -> QueryBuilder
+  ├─ take(count) -> QueryBuilder
+  ├─ select() -> QueryBuilder
+  ├─ select_fields(fields) -> QueryBuilder
+  ├─ group_by() -> QueryBuilder
+  ├─ distinct() -> QueryBuilder
+  ├─ count() -> QueryBuilder
+  ├─ to_sql_where() -> tuple[str, List[Any]]
+  ├─ to_nosql_filter() -> Dict[str, Any]
+
+
+FILE: src/polydb/advanced_query.py
+
+AdvancedQueryBuilder
+  ├─ join(table, on_left, on_right, join_type, alias) -> 'AdvancedQueryBuilder'
+  ├─ aggregate(function, field, alias) -> 'AdvancedQueryBuilder'
+  ├─ group_by() -> 'AdvancedQueryBuilder'
+  ├─ having(condition) -> 'AdvancedQueryBuilder'
+  ├─ to_sql() -> tuple[str, List[Any]]
+
+QueryHelper
+  ├─ count_by_field(table, field, group_field) -> AdvancedQueryBuilder
+  ├─ sum_by_category(table, sum_field, category_field) -> AdvancedQueryBuilder
+  ├─ join_with_filter(left_table, right_table, join_field) -> AdvancedQueryBuilder
+
+
+FILE: src/polydb/registry.py
+
+ModelRegistry
+  ├─ register(cls, model)
+  ├─ resolve(cls, model)
+  ├─ get(cls, model)
+
+
+FILE: src/polydb/monitoring.py
+
+MetricsCollector
+  ├─ record(metric)
+  ├─ register_hook(hook)
+  ├─ get_metrics(since, model, operation) -> List[QueryMetrics]
+  ├─ aggregate(since, model) -> AggregatedMetrics
+  ├─ clear_old_metrics(older_than)
+  ├─ export_prometheus() -> str
+
+HealthCheck
+  ├─ check_sql_health() -> Dict[str, Any]
+  ├─ check_nosql_health() -> Dict[str, Any]
+  ├─ check_cache_health() -> Dict[str, Any]
+  ├─ full_health_check() -> Dict[str, Any]
+
+
+FILE: src/polydb/batch.py
+
+BatchOperations
+  ├─ bulk_insert(model, records) -> BatchResult
+  ├─ bulk_update(model, updates) -> BatchResult
+  ├─ bulk_delete(model, entity_ids) -> BatchResult
+
+TransactionManager
+  ├─ execute(sql, params)
+
+
+FILE: src/polydb/security.py
+
+FieldEncryption
+  ├─ encrypt_fields(data, fields) -> Dict[str, Any]
+  ├─ decrypt_fields(data, fields) -> Dict[str, Any]
+
+DataMasking
+  ├─ register_model_config(model, config)
+  ├─ mask(data, model, actor_id, tenant_id) -> Dict[str, Any]
+
+RowLevelSecurity
+  ├─ add_policy(model, name, policy_func, apply_to)
+  ├─ check_access(model, item, context, operation) -> bool
+  ├─ enforce_read(model, query, context) -> Dict[str, Any]
+  ├─ filter_results(model, rows, context) -> List[Dict[str, Any]]
+  ├─ enforce_write(model, data, context) -> Dict[str, Any]
+  ├─ set_default_filters(model, read_filters, write_filters)
+
+
+FILE: src/polydb/cache.py
+
+RedisCacheEngine
+  ├─ get(model, query) -> Optional[Any]
+  ├─ set(model, query, value, ttl)
+  ├─ invalidate(model, query)
+  ├─ clear()
+  ├─ get_stats() -> Dict[str, Any]
+
+CacheWarmer
+  ├─ warm_model(model, queries, ttl)
+  ├─ warm_popular_queries(model, limit, ttl)
+
+CacheInvalidationStrategy
+  ├─ invalidate_on_write(model, data)
+  ├─ invalidate_related(model, relationships)
+
+
+FILE: src/polydb/types.py
+
+SQLAdapter
+  ├─ insert(table, data) -> JsonDict
+  ├─ select(table, query, limit, offset) -> List[JsonDict]
+  ├─ select_page(table, query, page_size, continuation_token) -> Tuple[List[JsonDict], Optional[str]]
+  ├─ update(table, entity_id, data) -> JsonDict
+  ├─ upsert(table, data) -> JsonDict
+  ├─ delete(table, entity_id) -> JsonDict
+  ├─ query_linq(table, builder) -> Union[List[JsonDict], int]
+  ├─ execute(sql, params) -> None
+
+NoSQLKVAdapter
+  ├─ put(model, data) -> JsonDict
+  ├─ query(model, query, limit, no_cache, cache_ttl) -> List[JsonDict]
+  ├─ query_page(model, query, page_size, continuation_token) -> Tuple[List[JsonDict], Optional[str]]
+  ├─ patch(model, entity_id, data) -> JsonDict
+  ├─ upsert(model, data) -> JsonDict
+  ├─ delete(model, entity_id) -> JsonDict
+  ├─ query_linq(model, builder) -> Union[List[JsonDict], int]
+
+
+FILE: src/polydb/retry.py
+
+MetricsHooks
+  ├─ on_query_start(operation)
+  ├─ on_query_end(operation, duration, success)
+  ├─ on_error(operation, error)
+
+
+FILE: src/polydb/multitenancy.py
+
+TenantRegistry
+  ├─ register(config)
+  ├─ get(tenant_id) -> Optional[TenantConfig]
+  ├─ list_all() -> List[TenantConfig]
+
+TenantContext
+  ├─ set_tenant(cls, tenant_id, registry)
+  ├─ get_tenant(cls) -> Optional[TenantConfig]
+  ├─ clear(cls)
+
+TenantIsolationEnforcer
+  ├─ enforce_read(model, query) -> Dict[str, Any]
+  ├─ enforce_write(model, data) -> Dict[str, Any]
+  ├─ get_table_name(base_table) -> str
+
+TenantQuotaManager
+  ├─ check_storage_quota(tenant_id, size_gb) -> bool
+  ├─ record_storage_usage(tenant_id, size_gb)
+  ├─ get_usage(tenant_id) -> Dict[str, float]
+
+TenantMigrationManager
+  ├─ provision_tenant(config)
+  ├─ deprovision_tenant(tenant_id)
+
+
+FILE: src/polydb/databaseFactory.py
+
+EngineConfig
+  ├─ sql() -> Any
+  ├─ nosql() -> Any
+
+DatabaseFactory
+  ├─ register_engine(engine) -> None
+  ├─ unregister_engine(name) -> None
+  ├─ get_engine(name) -> EngineConfig
+  ├─ create(model, data) -> JsonDict
+  ├─ read(model, query) -> List[JsonDict]
+  ├─ read_one(model, query) -> Optional[JsonDict]
+  ├─ read_page(model, query) -> Optional[Tuple[List[JsonDict], Optional[str]]]
+  ├─ update(model, entity_id, data) -> JsonDict
+  ├─ upsert(model, data) -> JsonDict
+  ├─ delete(model, entity_id) -> JsonDict
+  ├─ query_linq(model, builder) -> Union[List[JsonDict], int]
+
+
+FILE: src/polydb/cloudDatabaseFactory.py
+
+CloudDatabaseFactory
+  ├─ get_nosql_kv(partition_config)
+  ├─ get_object_storage()
+  ├─ get_queue()
+  ├─ get_shared_files()
+  ├─ get_sql()
+
+
+FILE: src/polydb/schema.py
+
+SchemaBuilder
+  ├─ add_column(column) -> 'SchemaBuilder'
+  ├─ add_index(index) -> 'SchemaBuilder'
+  ├─ to_create_table(table_name) -> str
+  ├─ to_create_indexes(table_name) -> List[str]
+
+MigrationManager
+  ├─ apply_migration(version, name, up_sql, down_sql) -> bool
+  ├─ rollback_migration(version) -> bool
+  ├─ get_applied_migrations() -> List[Dict[str, Any]]
+
+
+FILE: src/polydb/validation.py
+
+ModelValidator
+  ├─ validate_model(cls, model) -> ValidationResult
+  ├─ validate_and_raise(cls, model)
+
+SchemaValidator
+  ├─ validate_data(model, data) -> ValidationResult
+
+
+FILE: src/polydb/adapters/VercelKVAdapter.py
+
+VercelKVAdapter
+  ├─ query_page(model, query, page_size, continuation_token) -> Tuple[List[JsonDict], Optional[str]]
+
+
+FILE: src/polydb/adapters/EFSAdapter.py
+
+EFSAdapter
+  ├─ write(path, data) -> bool
+  ├─ read(path) -> bytes
+  ├─ delete(path) -> bool
+  ├─ list(directory) -> List[str]
+
+
+FILE: src/polydb/adapters/VercelBlobAdapter.py
+
+VercelBlobAdapter
+  ├─ put(key, data) -> str
+  ├─ get(key) -> bytes
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+  ├─ upload(key, data) -> str
+  ├─ download(key) -> bytes
+
+
+FILE: src/polydb/adapters/AzureFileStorageAdapter.py
+
+AzureFileStorageAdapter
+  ├─ upload(path, data) -> str
+  ├─ download(path) -> bytes
+  ├─ delete(path) -> bool
+  ├─ list(directory) -> List[str]
+  ├─ write(path, data) -> bool
+  ├─ read(path) -> bytes | None
+
+
+FILE: src/polydb/adapters/DynamoDBAdapter.py
+
+DynamoDBAdapter
+  ├─ query_page(model, query, page_size, continuation_token) -> Tuple[List[JsonDict], Optional[str]]
+
+
+FILE: src/polydb/adapters/MongoDBAdapter.py
+
+MongoDBAdapter
+  ├─ query_page(model, query, page_size, continuation_token)
+
+
+FILE: src/polydb/adapters/PostgreSQLAdapter.py
+
+PostgreSQLAdapter
+  ├─ begin_transaction() -> Any
+  ├─ commit(tx)
+  ├─ rollback(tx)
+  ├─ insert(table, data, tx) -> JsonDict
+  ├─ select(table, query, limit, offset, tx) -> List[JsonDict]
+  ├─ select_page(table, query, page_size, continuation_token, tx) -> Tuple[List[JsonDict], Optional[str]]
+  ├─ update(table, entity_id, data, tx) -> JsonDict
+  ├─ upsert(table, data, tx) -> JsonDict
+  ├─ delete(table, entity_id, tx) -> JsonDict
+  ├─ query_linq(table, builder, tx) -> Union[List[JsonDict], int]
+  ├─ execute(sql, params, tx) -> Union[None, JsonDict, List[JsonDict]]
+  ├─ distributed_lock(lock_name) -> Iterator[None]
+
+
+FILE: src/polydb/adapters/VercelQueueAdapter.py
+
+VercelQueueAdapter
+  ├─ send(message, queue_name) -> str
+  ├─ get_queue(queue_name, max_messages) -> List[Dict]
+  ├─ delete(message_id, queue_name) -> bool
+
+
+FILE: src/polydb/adapters/SQSAdapter.py
+
+SQSAdapter
+  ├─ send(message, queue_name) -> str
+  ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
+  ├─ delete(receipt_handle, queue_name) -> bool
+
+
+FILE: src/polydb/adapters/FirestoreAdapter.py
+
+FirestoreAdapter
+  ├─ query_page(model, query, page_size, continuation_token, order_by) -> Tuple[List[JsonDict], Optional[str]]
+
+
+FILE: src/polydb/adapters/AzureQueueAdapter.py
+
+AzureQueueAdapter
+  ├─ send(message, queue_name) -> str
+  ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
+  ├─ delete(message_id, queue_name, pop_receipt) -> bool
+
+
+FILE: src/polydb/adapters/BlockchainBlobAdapter.py
+
+BlockchainBlobAdapter
+  ├─ put(key, data) -> str
+  ├─ get(cid) -> bytes
+  ├─ delete(cid)
+
+
+FILE: src/polydb/adapters/S3Adapter.py
+
+S3Adapter
+  ├─ get(key) -> bytes | None
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+
+
+FILE: src/polydb/adapters/GCPStorageAdapter.py
+
+GCPStorageAdapter
+  ├─ get(key) -> Optional[bytes]
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+
+
+FILE: src/polydb/adapters/AzureBlobStorageAdapter.py
+
+AzureBlobStorageAdapter
+  ├─ get(key) -> bytes | None
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+
+
+FILE: src/polydb/adapters/BlockchainQueueAdapter.py
+
+BlockchainQueueAdapter
+  ├─ send(message, queue_name)
+  ├─ receive(queue_name, from_block) -> List[Dict]
+  ├─ delete(message_id)
+
+
+FILE: src/polydb/adapters/GCPPubSubAdapter.py
+
+GCPPubSubAdapter
+  ├─ send(message, queue_name) -> str
+  ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
+  ├─ delete(message_id, queue_name, pop_receipt) -> bool
+  ├─ ack(ack_id, queue_name) -> bool
+
+
+FILE: src/polydb/adapters/S3CompatibleAdapter.py
+
+S3CompatibleAdapter
+  ├─ get(key) -> bytes | None
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+
+
+FILE: src/polydb/adapters/BlockchainKVAdapter.py
+
+BlockchainKVAdapter
+  ├─ put(model, data) -> Dict[str, Any]
+  ├─ get(model, key) -> Optional[Dict[str, Any]]
+  ├─ delete(model, key)
+  ├─ query(model, query, limit)
+
+
+FILE: src/polydb/audit/models.py
+
+AuditRecord
+  ├─ create(cls)
+
+
+FILE: src/polydb/audit/context.py
+
+AuditContext
+  ├─ set(cls)
+  ├─ clear(cls)
+
+
+FILE: src/polydb/audit/AuditStorage.py
+
+AuditStorage
+  ├─ get_last_hash(tenant_id) -> Optional[str]
+  ├─ persist(record) -> None
+  ├─ verify_chain(tenant_id) -> bool
+
+
+FILE: src/polydb/audit/manager.py
+
+AuditManager
+  ├─ record() -> None
+
+
+FILE: src/polydb/base/ObjectStorageAdapter.py
+
+ObjectStorageAdapter
+  ├─ put(key, data, optimize, media_type) -> str
+  ├─ get(key) -> bytes
+  ├─ delete(key) -> bool
+  ├─ list(prefix) -> List[str]
+  ├─ upload(key, data) -> str
+  ├─ download(key) -> bytes
+
+
+FILE: src/polydb/base/NoSQLKVAdapter.py
+
+NoSQLKVAdapter
+  ├─ put(model, data) -> JsonDict
+  ├─ query(model, query, limit, no_cache, cache_ttl) -> List[JsonDict]
+  ├─ query_page(model, query, page_size, continuation_token) -> Tuple[List[JsonDict], Optional[str]]
+  ├─ patch(model, entity_id, data) -> JsonDict
+  ├─ upsert(model, data) -> JsonDict
+  ├─ delete(model, entity_id) -> JsonDict
+  ├─ query_linq_rows(model, builder) -> List[JsonDict]
+  ├─ query_linq(model, builder) -> Union[List[JsonDict], int]
+
+
+FILE: src/polydb/base/SharedFilesAdapter.py
+
+SharedFilesAdapter
+  ├─ write(path, data) -> bool
+  ├─ read(path) -> bytes | None
+  ├─ delete(path) -> bool
+  ├─ list(directory) -> List[str]
+
+
+FILE: src/polydb/base/QueueAdapter.py
+
+QueueAdapter
+  ├─ send(message, queue_name) -> str
+  ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
+  ├─ delete(message_id, queue_name, pop_receipt) -> bool

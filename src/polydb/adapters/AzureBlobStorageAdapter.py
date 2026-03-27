@@ -2,9 +2,9 @@
 
 import os
 import threading
-from typing import List, Optional
-
-from azure.storage.blob import BlobServiceClient, ContainerClient
+from typing import Any, Dict, List, Optional
+import mimetypes
+from azure.storage.blob import BlobServiceClient, ContainerClient, ContentSettings
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
 from ..base.ObjectStorageAdapter import ObjectStorageAdapter
@@ -71,17 +71,58 @@ class AzureBlobStorageAdapter(ObjectStorageAdapter):
         return self._container
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def _put_raw(self, key: str, data: bytes) -> str:
-        """Upload blob"""
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        """Upload blob with filename, media type, and metadata"""
         try:
             container = self._require_container()
 
-            blob_client = container.get_blob_client(key)
-            blob_client.upload_blob(data, overwrite=True)
+            # --------------------------------------------------
+            # Resolve filename
+            # --------------------------------------------------
+            filename = fileName or os.path.basename(key)
 
-            self.logger.debug(f"Uploaded blob key={key}")
+            # --------------------------------------------------
+            # Ensure extension from media_type if missing
+            # --------------------------------------------------
+            if media_type:
+                ext = mimetypes.guess_extension(media_type) or ""
+                if ext and not filename.lower().endswith(ext):
+                    filename += ext
 
-            return key
+            # --------------------------------------------------
+            # Final blob key (include filename if needed)
+            # --------------------------------------------------
+            blob_key = key
+            if fileName:
+                blob_key = f"{key.rstrip('/')}/{filename}"
+
+            blob_client = container.get_blob_client(blob_key)
+
+            # --------------------------------------------------
+            # Upload with content type + metadata
+            # --------------------------------------------------
+            blob_client.upload_blob(
+                data,
+                overwrite=True,
+                content_settings=ContentSettings(
+                    content_type=media_type or "application/octet-stream"
+                ),
+                metadata={
+                    **(metadata or {}),
+                    "filename": filename,
+                },
+            )
+
+            self.logger.debug(f"Uploaded blob key={blob_key}, type={media_type}")
+
+            return blob_client.url
 
         except Exception as e:
             raise StorageError(f"Azure Blob put failed: {e}")

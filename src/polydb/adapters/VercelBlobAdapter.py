@@ -1,14 +1,16 @@
 import os
-import requests
-from typing import List
+import mimetypes
 from pathlib import Path
+from typing import Any, Dict, List, Optional
 
+import requests
+
+from ..base.ObjectStorageAdapter import ObjectStorageAdapter
 from ..errors import StorageError
 from ..retry import retry
-from ..utils import setup_logger
 
 
-class VercelBlobAdapter:
+class VercelBlobAdapter(ObjectStorageAdapter):
     """
     Vercel Blob Storage adapter.
 
@@ -17,8 +19,7 @@ class VercelBlobAdapter:
     """
 
     def __init__(self, token: str = "", timeout: int = 10):
-
-        self.logger = setup_logger(self.__class__.__name__)
+        super().__init__()
 
         self.token = token or os.getenv("BLOB_READ_WRITE_TOKEN")
         self.timeout = timeout or int(os.getenv("VERCEL_BLOB_TIMEOUT", "10"))
@@ -29,53 +30,99 @@ class VercelBlobAdapter:
 
         self.local_mode = not bool(self.token)
 
-    # ---------------------------------------------------------
-    # PUT
-    # ---------------------------------------------------------
-
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def put(self, key: str, data: bytes) -> str:
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        """Upload object to Vercel Blob or local fallback and return URL/path"""
         try:
+            # --------------------------------------------------
+            # Resolve filename
+            # --------------------------------------------------
+            filename = fileName or os.path.basename(key)
 
-            # LOCAL MODE (tests)
+            # --------------------------------------------------
+            # Ensure extension from media_type
+            # --------------------------------------------------
+            if media_type:
+                ext = mimetypes.guess_extension(media_type) or ""
+                if ext and not filename.lower().endswith(ext):
+                    filename += ext
+
+            # --------------------------------------------------
+            # Final blob key
+            # --------------------------------------------------
+            blob_key = f"{key.rstrip('/')}/{filename}" if fileName else key
+
+            # --------------------------------------------------
+            # Metadata (string-safe)
+            # --------------------------------------------------
+            safe_metadata = {str(k): str(v) for k, v in (metadata or {}).items()}
+            safe_metadata["filename"] = filename
+            if media_type:
+                safe_metadata["contentType"] = media_type
+
+            # --------------------------------------------------
+            # LOCAL MODE
+            # --------------------------------------------------
             if self.local_mode:
-                path = self.local_dir / key
+                path = self.local_dir / blob_key
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_bytes(data)
+
+                meta_path = path.with_suffix(path.suffix + ".metadata.json")
+                try:
+                    import json
+
+                    meta_path.write_text(json.dumps(safe_metadata, ensure_ascii=False, indent=2))
+                except Exception:
+                    pass
+
+                self.logger.debug(f"Stored local Vercel blob: {blob_key}")
                 return str(path)
 
+            # --------------------------------------------------
             # REAL VERCEL
+            # --------------------------------------------------
+            headers = {
+                "Authorization": f"Bearer {self.token}",
+                "x-content-type": media_type or "application/octet-stream",
+            }
+
+            for k, v in safe_metadata.items():
+                headers[f"x-metadata-{k}"] = v
+
             response = requests.put(
-                f"https://blob.vercel-storage.com/{key}",
-                headers={
-                    "Authorization": f"Bearer {self.token}",
-                    "x-content-type": "application/octet-stream",
-                },
+                f"https://blob.vercel-storage.com/{blob_key}",
+                headers=headers,
                 data=data,
                 timeout=self.timeout,
             )
-
             response.raise_for_status()
 
             result = response.json()
 
-            return result.get("url") or result.get("pathname") or key
+            self.logger.debug(f"Uploaded Vercel blob: {blob_key}, type={media_type}")
+
+            return (
+                result.get("url") or result.get("downloadUrl") or result.get("pathname") or blob_key
+            )
 
         except Exception as e:
             raise StorageError(f"Vercel Blob put failed: {e}")
 
-    # ---------------------------------------------------------
-    # GET
-    # ---------------------------------------------------------
-
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def get(self, key: str) -> bytes:
+    def get(self, key: str) -> bytes | None:
         try:
-
             if self.local_mode:
                 path = self.local_dir / key
                 if not path.exists():
-                    raise StorageError("Object not found")
+                    return None
                 return path.read_bytes()
 
             response = requests.get(
@@ -84,25 +131,27 @@ class VercelBlobAdapter:
                 timeout=self.timeout,
             )
 
-            response.raise_for_status()
+            if response.status_code == 404:
+                return None
 
+            response.raise_for_status()
             return response.content
 
+        except StorageError:
+            raise
         except Exception as e:
             raise StorageError(f"Vercel Blob get failed: {e}")
-
-    # ---------------------------------------------------------
-    # DELETE
-    # ---------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
     def delete(self, key: str) -> bool:
         try:
-
             if self.local_mode:
                 path = self.local_dir / key
                 if path.exists():
                     path.unlink()
+                meta_path = path.with_suffix(path.suffix + ".metadata.json")
+                if meta_path.exists():
+                    meta_path.unlink()
                 return True
 
             response = requests.delete(
@@ -111,25 +160,22 @@ class VercelBlobAdapter:
                 timeout=self.timeout,
             )
 
-            response.raise_for_status()
+            if response.status_code == 404:
+                return False
 
+            response.raise_for_status()
             return True
 
         except Exception as e:
             raise StorageError(f"Vercel Blob delete failed: {e}")
 
-    # ---------------------------------------------------------
-    # LIST
-    # ---------------------------------------------------------
-
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
     def list(self, prefix: str = "") -> List[str]:
         try:
-
             if self.local_mode:
-                results = []
+                results: List[str] = []
                 for p in self.local_dir.rglob("*"):
-                    if p.is_file():
+                    if p.is_file() and not p.name.endswith(".metadata.json"):
                         rel = str(p.relative_to(self.local_dir))
                         if rel.startswith(prefix):
                             results.append(rel)
@@ -144,18 +190,7 @@ class VercelBlobAdapter:
             response.raise_for_status()
 
             blobs = response.json().get("blobs", [])
-
-            return [b.get("pathname") for b in blobs]
+            return [b.get("pathname") for b in blobs if b.get("pathname")]
 
         except Exception as e:
             raise StorageError(f"Vercel Blob list failed: {e}")
-
-    # ---------------------------------------------------------
-    # PUBLIC API (aliases used in tests)
-    # ---------------------------------------------------------
-
-    def upload(self, key: str, data: bytes) -> str:
-        return self.put(key, data)
-
-    def download(self, key: str) -> bytes:
-        return self.get(key)

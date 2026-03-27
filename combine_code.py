@@ -71,4 +71,4 @@ def collect_python_files(src_dir, output_file):
 
 
 if __name__ == "__main__":
-    collect_python_files("src", "all_src_code_combined.py")
+    collect_python_files("src", "polydb_code_combined.py")

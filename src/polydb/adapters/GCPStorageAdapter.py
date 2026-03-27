@@ -1,8 +1,9 @@
 # src/polydb/adapters/GCPStorageAdapter.py
 
+import mimetypes
 import os
 import threading
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 from google.cloud import storage
 from google.api_core.exceptions import NotFound
@@ -84,19 +85,64 @@ class GCPStorageAdapter(ObjectStorageAdapter):
     # ------------------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def _put_raw(self, key: str, data: bytes) -> str:
-        """Upload object to GCS"""
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        """Upload object to GCS with media type, metadata, filename handling"""
         try:
             if not self._bucket:
                 raise ConnectionError("GCS bucket not initialized")
 
-            blob = self._bucket.blob(key)
+            # --------------------------------------------------
+            # Resolve filename
+            # --------------------------------------------------
+            filename = fileName or os.path.basename(key)
 
-            blob.upload_from_string(data)
+            # --------------------------------------------------
+            # Ensure extension from media_type
+            # --------------------------------------------------
+            if media_type:
+                ext = mimetypes.guess_extension(media_type) or ""
+                if ext and not filename.lower().endswith(ext):
+                    filename += ext
 
-            self.logger.debug(f"GCS uploaded blob: {key}")
+            # --------------------------------------------------
+            # Final blob key
+            # --------------------------------------------------
+            blob_key = f"{key.rstrip('/')}/{filename}" if fileName else key
 
-            return key
+            blob = self._bucket.blob(blob_key)
+
+            # --------------------------------------------------
+            # Metadata (must be string)
+            # --------------------------------------------------
+            safe_metadata = {k: str(v) for k, v in (metadata or {}).items()}
+            safe_metadata["filename"] = filename
+
+            blob.metadata = safe_metadata
+
+            # --------------------------------------------------
+            # Upload with content type
+            # --------------------------------------------------
+            blob.upload_from_string(
+                data,
+                content_type=media_type or "application/octet-stream",
+            )
+
+            # Persist metadata (required in GCS)
+            blob.patch()
+
+            self.logger.debug(f"GCS uploaded blob: {blob_key}, type={media_type}")
+
+            # --------------------------------------------------
+            # Return public URL
+            # --------------------------------------------------
+            return f"https://storage.googleapis.com/{self.bucket_name}/{blob_key}"
 
         except Exception as e:
             raise StorageError(f"GCS put failed: {str(e)}")

@@ -1,10 +1,12 @@
 # src/polydb/adapters/S3CompatibleAdapter.py
+import mimetypes
 import os
 import threading
-from typing import List
+from typing import Any, Dict, List, Optional
 from ..base.ObjectStorageAdapter import ObjectStorageAdapter
 from ..errors import StorageError, ConnectionError
 from ..retry import retry
+
 
 class S3CompatibleAdapter(ObjectStorageAdapter):
     """S3-compatible storage (MinIO, DigitalOcean Spaces) with client reuse"""
@@ -37,15 +39,68 @@ class S3CompatibleAdapter(ObjectStorageAdapter):
             raise ConnectionError(f"Failed to initialize S3-compatible client: {str(e)}")
 
     @retry(max_attempts=3, delay=1.0, exceptions=(StorageError,))
-    def _put_raw(self, key: str, data: bytes) -> str:
-        """Store object"""
+    def _put_raw(
+        self,
+        key: str,
+        data: bytes,
+        fileName: str = "",
+        media_type: Optional[str] = None,
+        metadata: Dict[str, Any] | None = None,
+    ) -> str:
+        """Upload object to S3-compatible storage with metadata and media type"""
         try:
             if not self._client:
                 self._initialize_client()
-            if self._client:
-                self._client.put_object(Bucket=self.bucket_name, Key=key, Body=data)
-                self.logger.debug(f"Uploaded to S3-compatible: {key}")
-            return key
+
+            # --------------------------------------------------
+            # Resolve filename
+            # --------------------------------------------------
+            filename = fileName or os.path.basename(key)
+
+            # --------------------------------------------------
+            # Ensure extension from media_type
+            # --------------------------------------------------
+            if media_type:
+                ext = mimetypes.guess_extension(media_type) or ""
+                if ext and not filename.lower().endswith(ext):
+                    filename += ext
+
+            # --------------------------------------------------
+            # Final key
+            # --------------------------------------------------
+            blob_key = f"{key.rstrip('/')}/{filename}" if fileName else key
+
+            # --------------------------------------------------
+            # Metadata (string only)
+            # --------------------------------------------------
+            safe_metadata = {k: str(v) for k, v in (metadata or {}).items()}
+            safe_metadata["filename"] = filename
+
+            # --------------------------------------------------
+            # Upload
+            # --------------------------------------------------
+            self._client.put_object(  # type: ignore
+                Bucket=self.bucket_name,
+                Key=blob_key,
+                Body=data,
+                ContentType=media_type or "application/octet-stream",
+                Metadata=safe_metadata,
+            )
+
+            self.logger.debug(f"S3 uploaded: {blob_key}, type={media_type}")
+
+            # --------------------------------------------------
+            # Return URL
+            # --------------------------------------------------
+            if self.endpoint:
+                # MinIO / Spaces / custom endpoint
+                url = f"{self.endpoint.rstrip('/')}/{self.bucket_name}/{blob_key}"
+            else:
+                # AWS S3 default
+                url = f"https://{self.bucket_name}.s3.amazonaws.com/{blob_key}"
+
+            return url
+
         except Exception as e:
             raise StorageError(f"S3-compatible put failed: {str(e)}")
 
@@ -87,4 +142,3 @@ class S3CompatibleAdapter(ObjectStorageAdapter):
             return []
         except Exception as e:
             raise StorageError(f"S3-compatible list failed: {str(e)}")
-
