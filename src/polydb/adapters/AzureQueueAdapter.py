@@ -3,6 +3,8 @@
 import os
 import threading
 import json
+import re
+
 from typing import Any, Dict, List, Optional
 
 from azure.storage.queue import QueueServiceClient, QueueClient
@@ -40,6 +42,12 @@ class AzureQueueAdapter(QueueAdapter):
 
         self._initialize_client()
 
+    def _normalize_queue_name(self, name: str) -> str:
+        name = name.lower()
+        name = re.sub(r"[^a-z0-9-]", "-", name)  # replace invalid chars
+        name = re.sub(r"-+", "-", name)  # collapse multiple dashes
+        return name.strip("-")
+
     def _initialize_client(self) -> None:
         """Initialize Azure Queue client"""
         try:
@@ -59,7 +67,7 @@ class AzureQueueAdapter(QueueAdapter):
         """Get or create queue client"""
         if self._client is None:
             raise ConnectionError("Azure Queue client not initialized")
-
+        queue_name = self._normalize_queue_name(queue_name)
         if queue_name not in self._queues:
             queue_client = self._client.get_queue_client(queue_name)
 
@@ -76,6 +84,7 @@ class AzureQueueAdapter(QueueAdapter):
     def send(self, message: Dict[str, Any], queue_name: str = "default") -> str:
         """Send message to queue"""
         try:
+            queue_name = self._normalize_queue_name(queue_name)
             queue_client = self._get_queue(queue_name)
 
             response = queue_client.send_message(json.dumps(message, default=json_safe))
@@ -89,6 +98,8 @@ class AzureQueueAdapter(QueueAdapter):
     def receive(self, queue_name: str = "default", max_messages: int = 1) -> List[Dict[str, Any]]:
         """Receive messages"""
         try:
+
+            queue_name = self._normalize_queue_name(queue_name)
             queue_client = self._get_queue(queue_name)
 
             messages = queue_client.receive_messages(max_messages=max_messages)
@@ -113,6 +124,7 @@ class AzureQueueAdapter(QueueAdapter):
     def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
         """Delete message from queue"""
         try:
+            queue_name = self._normalize_queue_name(queue_name)
             queue_client = self._get_queue(queue_name)
 
             queue_client.delete_message(message_id, pop_receipt)
@@ -144,7 +156,7 @@ class AzureQueueAdapter(QueueAdapter):
         """
         if not message_id:
             raise QueueError("AzureQueueAdapter.ack requires message_id")
-
+        queue_name = self._normalize_queue_name(queue_name)
         return self.delete(
             message_id=message_id,
             queue_name=queue_name,

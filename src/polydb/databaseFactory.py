@@ -145,6 +145,7 @@ class DatabaseFactory:
         # Multi-engine
         engines: Optional[List[EngineConfig]] = None,
         # Feature flags
+        redis_cache_url: Optional[str] = None,
         enable_retries: bool = True,
         enable_audit: bool = True,
         enable_audit_reads: bool = False,
@@ -168,7 +169,7 @@ class DatabaseFactory:
         self._cache: Optional[RedisCacheEngine] = None
         self.cache_warmer: Optional[CacheWarmer] = None
         if enable_cache and use_redis_cache:
-            redis_url = os.getenv("REDIS_CACHE_URL")
+            redis_url = redis_cache_url or os.getenv("REDIS_CACHE_URL") or os.getenv("REDIS_URL")
             if redis_url:
                 self._cache = RedisCacheEngine(redis_url=redis_url)
                 self.cache_warmer = CacheWarmer(self, self._cache)
