@@ -1,4 +1,85 @@
 
+FILE: src/polydb/PolyDB.py
+
+PolyDB
+  ├─ get_cloud_factory() -> CloudDatabaseFactory
+  ├─ get_database_factory() -> DatabaseFactory
+  ├─ get_sql()
+  ├─ get_nosql(partition_config)
+  ├─ get_object_storage(name)
+  ├─ get_shared_files()
+  ├─ get_queue()
+  ├─ get_cache_engine() -> Optional[RedisCacheEngine]
+  ├─ create(model, data) -> JsonDict
+  ├─ read(model, query) -> List[JsonDict]
+  ├─ read_one(model, query) -> Optional[JsonDict]
+  ├─ get(model, entity_id) -> Optional[JsonDict]
+  ├─ read_page(model, query) -> Optional[Tuple[List[JsonDict], Optional[str]]]
+  ├─ update(model, entity_id, data) -> JsonDict
+  ├─ upsert(model, data) -> JsonDict
+  ├─ delete(model, entity_id) -> JsonDict
+  ├─ query() -> QueryBuilder
+  ├─ advanced_query() -> AdvancedQueryBuilder
+  ├─ query_linq(model, builder)
+  ├─ helper() -> QueryHelper
+  ├─ execute_sql(sql, params)
+  ├─ distributed_lock(lock_name)
+  ├─ begin_transaction()
+  ├─ commit(tx) -> None
+  ├─ rollback(tx) -> None
+  ├─ upload_blob(data, key) -> str
+  ├─ get_blob(key) -> Optional[bytes]
+  ├─ download_blob(key) -> bytes
+  ├─ delete_blob(key) -> bool
+  ├─ list_blob(prefix) -> List[str]
+  ├─ send_queue(message) -> str
+  ├─ receive_queue() -> List[Dict[str, Any]]
+  ├─ delete_queue(message_id) -> bool
+  ├─ publish_queue(message) -> str
+  ├─ consume_queue() -> List[Dict[str, Any]]
+  ├─ ack_queue(receipt_handle) -> bool
+  ├─ write_file(path, data) -> bool
+  ├─ read_file(path) -> Optional[bytes]
+  ├─ delete_file(path) -> bool
+  ├─ list_file(directory) -> List[str]
+  ├─ set_cache(model, key, value) -> None
+  ├─ get_cache(model, key) -> Optional[Any]
+  ├─ invalidate_cache(model, key) -> None
+  ├─ cache_stats() -> Dict[str, Any]
+  ├─ warm_model_cache(model, queries) -> None
+  ├─ warm_popular_queries(model) -> None
+  ├─ bulk_insert(model, records) -> BatchResult
+  ├─ bulk_update(model, updates) -> BatchResult
+  ├─ bulk_delete(model, entity_ids) -> BatchResult
+  ├─ validate_model(model)
+  ├─ validate(model) -> None
+  ├─ validate_data(model, data)
+  ├─ register_engine(engine) -> None
+  ├─ unregister_engine(name) -> None
+  ├─ get_engine(name) -> EngineConfig
+  ├─ health_check() -> Dict[str, Any]
+  ├─ get_metrics()
+  ├─ aggregate_metrics()
+  ├─ export_prometheus() -> str
+  ├─ encrypt_fields(data, fields) -> JsonDict
+  ├─ decrypt_fields(data, fields) -> JsonDict
+  ├─ mask_data(data) -> JsonDict
+  ├─ register_masking_config(model, config) -> None
+  ├─ add_rls_policy(model, name, policy_func) -> None
+  ├─ set_default_rls_filters(model) -> None
+  ├─ with_tenant(tenant_id) -> 'PolyDB'
+  ├─ get_tenant() -> Optional[TenantConfig]
+  ├─ clear_tenant() -> None
+  ├─ register_tenant(config) -> None
+  ├─ get_tenant_config(tenant_id) -> Optional[TenantConfig]
+  ├─ list_tenants() -> List[TenantConfig]
+  ├─ check_storage_quota(tenant_id, size_gb) -> bool
+  ├─ record_storage_usage(tenant_id, size_gb) -> None
+  ├─ get_tenant_usage(tenant_id) -> Dict[str, float]
+  ├─ provision_tenant(config) -> None
+  ├─ deprovision_tenant(tenant_id) -> None
+
+
 FILE: src/polydb/query.py
 
 QueryBuilder
@@ -178,14 +259,31 @@ DatabaseFactory
   ├─ upsert(model, data) -> JsonDict
   ├─ delete(model, entity_id) -> JsonDict
   ├─ query_linq(model, builder) -> Union[List[JsonDict], int]
+  ├─ upload_blob(key, data) -> str
+  ├─ download_blob(key) -> Optional[bytes]
+  ├─ delete_blob(key) -> bool
+  ├─ list_blob(prefix) -> List[str]
+  ├─ send_queue(message) -> str
+  ├─ receive_queue() -> List[Dict[str, Any]]
+  ├─ ack_queue(ack_id) -> bool
+  ├─ delete_queue(message_id) -> bool
+  ├─ write_file(path, data) -> bool
+  ├─ read_file(path) -> Optional[bytes]
+  ├─ delete_file(path) -> bool
+  ├─ list_files(directory) -> List[str]
+  ├─ set_cache(model, key, value, ttl) -> None
+  ├─ get_cache(model, key) -> Optional[Any]
+  ├─ invalidate_cache(model, key) -> None
 
 
 FILE: src/polydb/cloudDatabaseFactory.py
 
 CloudDatabaseFactory
-  ├─ get_object_storage(name) -> PostgreSQLAdapter | AzureBlobStorageAdapter | S3CompatibleAdapter | GCPStorageAdapter | VercelBlobAdapter | BlockchainBlobAdapter
-  ├─ get_nosql_kv(partition_config)
-  ├─ get_sql()
+  ├─ get_object_storage(name) -> AzureBlobStorageAdapter | S3CompatibleAdapter | GCPStorageAdapter | VercelBlobAdapter | BlockchainBlobAdapter
+  ├─ get_sql(name)
+  ├─ get_nosql_kv(partition_config, name)
+  ├─ get_queue(name) -> AzureQueueAdapter | SQSAdapter | GCPPubSubAdapter | VercelQueueAdapter | BlockchainQueueAdapter
+  ├─ get_files(name)
 
 
 FILE: src/polydb/schema.py
@@ -279,8 +377,9 @@ FILE: src/polydb/adapters/VercelQueueAdapter.py
 
 VercelQueueAdapter
   ├─ send(message, queue_name) -> str
-  ├─ get_queue(queue_name, max_messages) -> List[Dict]
-  ├─ delete(message_id, queue_name) -> bool
+  ├─ receive(queue_name, max_messages) -> List[Dict]
+  ├─ delete(message_id, queue_name, pop_receipt) -> bool
+  ├─ ack(ack_id, queue_name) -> bool
 
 
 FILE: src/polydb/adapters/SQSAdapter.py
@@ -289,6 +388,7 @@ SQSAdapter
   ├─ send(message, queue_name) -> str
   ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
   ├─ delete(receipt_handle, queue_name) -> bool
+  ├─ ack(ack_id, queue_name) -> bool
 
 
 FILE: src/polydb/adapters/FirestoreAdapter.py
@@ -303,6 +403,7 @@ AzureQueueAdapter
   ├─ send(message, queue_name) -> str
   ├─ receive(queue_name, max_messages) -> List[Dict[str, Any]]
   ├─ delete(message_id, queue_name, pop_receipt) -> bool
+  ├─ ack(pop_receipt, queue_name, message_id) -> bool
 
 
 FILE: src/polydb/adapters/BlockchainBlobAdapter.py
@@ -340,9 +441,10 @@ AzureBlobStorageAdapter
 FILE: src/polydb/adapters/BlockchainQueueAdapter.py
 
 BlockchainQueueAdapter
-  ├─ send(message, queue_name)
-  ├─ receive(queue_name, from_block) -> List[Dict]
-  ├─ delete(message_id)
+  ├─ send(message, queue_name) -> str
+  ├─ receive(queue_name, max_messages, from_block) -> List[Dict]
+  ├─ delete(message_id, queue_name, pop_receipt) -> bool
+  ├─ ack(ack_id, queue_name) -> bool
 
 
 FILE: src/polydb/adapters/GCPPubSubAdapter.py
