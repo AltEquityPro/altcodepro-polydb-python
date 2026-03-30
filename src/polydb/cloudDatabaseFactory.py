@@ -4,7 +4,8 @@ import os
 import threading
 from typing import Dict, List, Optional
 
-
+from .adapters.AzureFileStorageAdapter import AzureFileStorageAdapter
+from .adapters.EFSAdapter import EFSAdapter
 from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
 from .adapters.AzureBlobStorageAdapter import AzureBlobStorageAdapter
 from .adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
@@ -441,7 +442,17 @@ class CloudDatabaseFactory:
             self.instances["queue"] = instance
             return instance
 
-    def get_files(self, name: str = "files"):
+    def get_files(
+        self, name: str = "files"
+    ) -> (
+        AzureFileStorageAdapter
+        | EFSAdapter
+        | GCPStorageAdapter
+        | AzureBlobStorageAdapter
+        | S3CompatibleAdapter
+        | VercelBlobAdapter
+        | BlockchainBlobAdapter
+    ):
         with self._lock:
             if name in self.instances:
                 return self.instances[name]

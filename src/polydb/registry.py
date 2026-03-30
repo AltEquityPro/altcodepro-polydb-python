@@ -22,6 +22,17 @@ class ModelRegistry:
 
         cls._models[model] = meta
 
+    @classmethod
+    def register_dynamic(cls, model_name: str, meta: dict):
+        """
+        Register a model from a schema dict — no Python class needed.
+        Creates a lightweight runtime class on the fly.
+        """
+        # Create a dynamic class with __polydb__ metadata
+        dynamic_class = type(model_name, (), {"__polydb__": meta})
+        cls._models[dynamic_class] = meta
+        return dynamic_class
+
     # -------------------------
     # NEW: resolve()
     # -------------------------
