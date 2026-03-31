@@ -19,7 +19,9 @@ from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
 from ..types import JsonDict
 from ..models import PartitionConfig
+import logging
 
+logger = logging.getLogger(__name__)
 
 _BYTES_PREFIX = "@@polydb_bytes@@:"
 _JSON_PREFIX = "@@polydb_json@@:"
@@ -40,7 +42,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     - Always returns id (derived from RowKey if missing)
     """
 
-    AZURE_TABLE_MAX_SIZE = 1024 * 1024  # 1MB
+    AZURE_TABLE_MAX_SIZE = 60 * 1024  # 1MB
     _RESERVED = {"PartitionKey", "RowKey", "Timestamp", "etag", "ETag"}
 
     def __init__(
@@ -281,11 +283,22 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         return out
 
+    def _sanitize_blob_part(self, value: str) -> str:
+        # Blob-safe: lowercase, alphanumeric + dash only
+        s = str(value).lower()
+        s = re.sub(r"[^a-z0-9\-]", "-", s)
+        s = re.sub(r"-+", "-", s)
+        return s.strip("-")[:100]
+
     def _entity_size_bytes(self, entity: JsonDict) -> int:
         return len(json.dumps(entity, default=json_safe).encode("utf-8"))
 
     def _blob_key(self, pk: str, rk: str, checksum: str) -> str:
-        return f"{pk}/{rk}/{checksum}.json"
+        safe_pk = self._sanitize_blob_part(pk)
+        safe_rk = self._sanitize_blob_part(rk)
+
+        # Flat structure (avoid deep paths)
+        return f"{safe_pk}-{safe_rk}-{checksum}.json"
 
     def _blob_upload(self, blob_key: str, data_bytes: bytes):
         if not self._blob_service:
@@ -323,14 +336,53 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             entity = self._pack_entity(model, safe_pk, safe_rk, data)
 
-            size = self._entity_size_bytes(entity)
-            if size > self.AZURE_TABLE_MAX_SIZE:
-                full_payload_bytes = json.dumps(entity, default=json_safe).encode("utf-8")
+            # ---------------------------------------------------
+            # SIZE ESTIMATION (Azure uses UTF-16 for strings)
+            # ---------------------------------------------------
+            MAX_PROPERTY_CHARS = 30 * 1024  # ~30K chars safe under 32K limit
+            MAX_ENTITY_SIZE = 40 * 1024  # conservative total entity threshold
+
+            def _is_large_string(val: Any) -> bool:
+                return isinstance(val, str) and len(val) > MAX_PROPERTY_CHARS
+
+            # Check if any property exceeds safe char limit
+            has_large_property = False
+            large_key = None
+
+            for key, value in entity.items():
+                if _is_large_string(value):
+                    has_large_property = True
+                    large_key = key
+                    logger.warning(
+                        f"LARGE PROPERTY DETECTED: {key} length={len(value)} chars → forcing blob overflow"
+                    )
+                    break
+
+            # Check full entity size
+            entity_json = json.dumps(entity, default=json_safe)
+            entity_size = len(entity_json.encode("utf-8"))
+
+            force_blob = has_large_property or entity_size > MAX_ENTITY_SIZE
+
+            if force_blob:
+                logger.info(
+                    f"Entity exceeds safe limits → using blob storage "
+                    f"(size={entity_size//1024} KB, large_key={large_key})"
+                )
+
+                # ---------------------------------------------------
+                # STORE FULL ENTITY IN BLOB
+                # ---------------------------------------------------
+                full_payload_bytes = entity_json.encode("utf-8")
                 checksum = hashlib.md5(full_payload_bytes).hexdigest()
                 blob_key = self._blob_key(safe_pk, safe_rk, checksum)
+
                 self._blob_upload(blob_key, full_payload_bytes)
 
-                reference_entity: JsonDict = {
+                # ---------------------------------------------------
+                # STORE REFERENCE IN TABLE
+                # ---------------------------------------------------
+                reference_entity = {
                     "PartitionKey": safe_pk,
                     "RowKey": safe_rk,
                     _MODEL_FIELD: model.__qualname__,
@@ -341,31 +393,49 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     "__keymap__": entity.get("__keymap__", "{}"),
                 }
 
-                # keep a small index of scalars for basic filtering
-                kept = 0
+                # Keep only small searchable fields
                 for k, v in entity.items():
                     if k in ("PartitionKey", "RowKey", "__keymap__", _MODEL_FIELD):
                         continue
                     if k.startswith("_"):
                         continue
-                    if v is None or isinstance(v, (str, bool, int, float, datetime)):
+
+                    if isinstance(v, (str, bool, int, float)):
+                        if isinstance(v, str) and len(v) > 2000:
+                            continue
                         reference_entity[k] = v
-                        kept += 1
-                    if kept >= 50:
-                        break
+
+                    elif isinstance(v, datetime):
+                        reference_entity[k] = v
 
                 self._table_client.upsert_entity(reference_entity)
+
+                logger.info(f"Stored in blob: {blob_key} ({len(full_payload_bytes)//1024} KB)")
+
                 return {
                     "PartitionKey": safe_pk,
                     "RowKey": safe_rk,
                     "_overflow": True,
+                    "_blob_key": blob_key,
                     "id": safe_rk,
                 }
 
+            # ---------------------------------------------------
+            # NORMAL TABLE STORAGE
+            # ---------------------------------------------------
             self._table_client.upsert_entity(entity)
-            return {"PartitionKey": safe_pk, "RowKey": safe_rk, "id": safe_rk}
+
+            return {
+                "PartitionKey": safe_pk,
+                "RowKey": safe_rk,
+                "id": safe_rk,
+            }
 
         except Exception as e:
+            # Do NOT retry deterministic size errors
+            if "PropertyValueTooLarge" in str(e):
+                raise NoSQLError("Azure Table limit exceeded → must use blob overflow") from e
+
             raise NoSQLError(f"Azure Table put failed: {str(e)}")
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
