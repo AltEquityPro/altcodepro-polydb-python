@@ -469,6 +469,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                 restored = json.loads(blob_data.decode("utf-8"))
                 out = self._unpack_entity(restored)
+                out["_overflow"] = True
+                out["_blob_key"] = blob_key
+                out["_checksum"] = checksum
                 if "id" not in out:
                     out["id"] = safe_rk
                 return out
@@ -541,10 +544,19 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                 if ent_dict.get("_overflow"):
                     blob_key = ent_dict.get("_blob_key")
+                    checksum = ent_dict.get("_checksum")
                     if blob_key:
-                        blob_data = self._blob_download(blob_key)
-                        restored = json.loads(blob_data.decode("utf-8"))
-                        out = self._unpack_entity(restored)
+                        try:
+                            blob_data = self._blob_download(blob_key)
+                            actual_checksum = hashlib.md5(blob_data).hexdigest()
+                            if checksum and actual_checksum != checksum:
+                                raise NoSQLError("Checksum mismatch")
+
+                            restored = json.loads(blob_data.decode("utf-8"))
+                            out = self._unpack_entity(restored)
+                        except Exception as e:
+                            logger.error(f"Blob read failed, falling back to table: {e}")
+                            out = self._unpack_entity(ent_dict)
                     else:
                         out = self._unpack_entity(ent_dict)
                 else:
