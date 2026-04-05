@@ -115,6 +115,7 @@ FILE: src/polydb/registry.py
 
 ModelRegistry
   ├─ register(cls, model)
+  ├─ register_dynamic(cls, model_name, meta)
   ├─ resolve(cls, model)
   ├─ get(cls, model)
 
@@ -174,6 +175,11 @@ RedisCacheEngine
   ├─ invalidate(model, query)
   ├─ clear()
   ├─ get_stats() -> Dict[str, Any]
+  ├─ zadd(model, key, mapping) -> None
+  ├─ zcard(model, key) -> int
+  ├─ zremrangebyscore(model, key, min_score, max_score) -> None
+  ├─ expire_key(model, key, ttl) -> None
+  ├─ delete_key(model, key) -> None
 
 CacheWarmer
   ├─ warm_model(model, queries, ttl)
@@ -254,11 +260,11 @@ DatabaseFactory
   ├─ create(model, data) -> JsonDict
   ├─ read(model, query) -> List[JsonDict]
   ├─ read_one(model, query) -> Optional[JsonDict]
-  ├─ read_page(model, query) -> Optional[Tuple[List[JsonDict], Optional[str]]]
   ├─ update(model, entity_id, data) -> JsonDict
   ├─ upsert(model, data) -> JsonDict
   ├─ delete(model, entity_id) -> JsonDict
   ├─ query_linq(model, builder) -> Union[List[JsonDict], int]
+  ├─ read_page(model, query) -> Optional[Tuple[List[JsonDict], Optional[str]]]
   ├─ upload_blob(key, data) -> str
   ├─ download_blob(key) -> Optional[bytes]
   ├─ delete_blob(key) -> bool
@@ -283,7 +289,7 @@ CloudDatabaseFactory
   ├─ get_sql(name)
   ├─ get_nosql_kv(partition_config, name)
   ├─ get_queue(name) -> AzureQueueAdapter | SQSAdapter | GCPPubSubAdapter | VercelQueueAdapter | BlockchainQueueAdapter
-  ├─ get_files(name)
+  ├─ get_files(name) -> AzureFileStorageAdapter | EFSAdapter | GCPStorageAdapter | AzureBlobStorageAdapter | S3CompatibleAdapter | VercelBlobAdapter | BlockchainBlobAdapter
 
 
 FILE: src/polydb/schema.py
