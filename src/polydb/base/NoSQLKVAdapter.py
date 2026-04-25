@@ -36,8 +36,8 @@ class NoSQLKVAdapter:
     def _get_pk_rk(self, model: type, data: JsonDict) -> Tuple[str, str]:
         """Extract PK/RK from model metadata"""
         meta = getattr(model, "__polydb__", {})
-        pk_field = meta.get("pk_field", "id")
-        rk_field = meta.get("rk_field")
+        pk_field = meta.get("pk_field") or  meta.get("partition_key", "tenant_id")
+        rk_field = meta.get("rk_field") or  meta.get("sort_key", "id")
 
         if self.partition_config:
             try:
@@ -257,6 +257,7 @@ class NoSQLKVAdapter:
         if isinstance(entity_id, dict):
             pk = entity_id.get("partition_key") or entity_id.get("pk")
             rk = entity_id.get("row_key") or entity_id.get("rk") or entity_id.get("id")
+            
         else:
             pk, rk = self._get_pk_rk(model, {"id": entity_id})
 

@@ -234,7 +234,6 @@ class CloudDatabaseFactory:
                 from .adapters.AzureTableStorageAdapter import AzureTableStorageAdapter
 
                 connection_string = ""
-                table_name = ""
                 container_name = ""
 
                 if isinstance(cfg, AzureTableConfig):
@@ -245,7 +244,6 @@ class CloudDatabaseFactory:
                 instance = AzureTableStorageAdapter(
                     partition_config=partition_config,
                     connection_string=connection_string,
-                    table_name=table_name,
                     container_name=container_name,
                 )
 

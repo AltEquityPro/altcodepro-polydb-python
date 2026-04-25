@@ -20,6 +20,10 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
 from tenacity import retry, stop_after_attempt, wait_exponential
 
+from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
+
+from .base.NoSQLKVAdapter import NoSQLKVAdapter
+
 from .batch import BatchOperations
 from .cache import CacheWarmer, RedisCacheEngine
 from .monitoring import HealthCheck, MetricsCollector, PerformanceMonitor
@@ -81,8 +85,8 @@ class EngineOverride:
 
 @dataclass
 class _ResolvedAdapters:
-    sql: Any
-    nosql: Any
+    sql: PostgreSQLAdapter
+    nosql: NoSQLKVAdapter
     engine_name: str
 
 
@@ -281,14 +285,14 @@ class DatabaseFactory:
         return self._engine_by_name[name]
 
     @property
-    def _sql(self) -> Any:
+    def _sql(self) -> PostgreSQLAdapter:
         for e in self._engines:
             if e.is_default_sql:
                 return e.sql()
         return self._engines[0].sql()
 
     @property
-    def _nosql(self) -> Any:
+    def _nosql(self) -> NoSQLKVAdapter:
         for e in self._engines:
             if e.is_default_nosql:
                 return e.nosql()

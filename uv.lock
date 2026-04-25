@@ -133,7 +133,7 @@ wheels = [
 
 [[package]]
 name = "altcodepro-polydb-python"
-version = "2.3.0"
+version = "2.3.5"
 source = { editable = "." }
 dependencies = [
     { name = "azure-storage-queue" },

@@ -49,7 +49,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self,
         partition_config: Optional[PartitionConfig] = None,
         connection_string: str = "",
-        table_name="",
         container_name="",
     ):
         super().__init__(partition_config)
@@ -57,14 +56,12 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self.connection_string = (
             connection_string or os.getenv("AZURE_STORAGE_CONNECTION_STRING") or ""
         )
-        self.table_name = table_name or os.getenv("AZURE_TABLE_NAME", "defaulttable") or ""
         self.container_name = container_name or os.getenv("AZURE_CONTAINER_NAME", "overflow") or ""
 
         if not self.connection_string:
             raise ConnectionError("AZURE_STORAGE_CONNECTION_STRING must be set")
 
-        self._client = None
-        self._table_client = None
+        self._client: Any = None
         self._blob_service = None
         self._client_lock = threading.Lock()
         self._initialize_client()
@@ -77,13 +74,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             with self._client_lock:
                 if not self._client:
                     self._client = TableServiceClient.from_connection_string(self.connection_string)
-                    self._table_client = self._client.get_table_client(self.table_name)
-
-                    try:
-                        self._client.create_table_if_not_exists(self.table_name)
-                    except Exception:
-                        pass
-
                     self._blob_service = BlobServiceClient.from_connection_string(
                         self.connection_string
                     )
@@ -323,13 +313,71 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     # -----------------------------
     # Required NoSQLKVAdapter hooks
     # -----------------------------
+    def _sanitize_table_name(self, name: str) -> str:
+        """Convert collection_name to valid Azure Table name (alphanumeric only)."""
+        if not name:
+            return "defaulttable"
+
+        # Remove all invalid characters, keep only letters and numbers
+        sanitized = re.sub(r"[^a-zA-Z0-9]", "", name)
+
+        # Must start with a letter
+        if sanitized and sanitized[0].isdigit():
+            sanitized = "t" + sanitized
+
+        # Must be 3-63 characters
+        if len(sanitized) < 3:
+            sanitized = sanitized + "table"
+        if len(sanitized) > 63:
+            sanitized = sanitized[:63]
+
+        return sanitized.lower()
+
+    def _get_table_name(self, model: type) -> str:
+        """
+        Extract collection_name from UDL model definition.
+        """
+        # Primary source: UDL definition
+        definition = getattr(model, "__udl_definition__", None)
+        if definition:
+            metadata = getattr(definition, "x_metadata", {}) or {}
+            collection_name = metadata.get("collection_name")
+            if collection_name:
+                return self._sanitize_table_name(collection_name)
+
+        # Fallback: __polydb__ metadata
+        polydb_meta = getattr(model, "__polydb__", None)
+        if isinstance(polydb_meta, dict):
+            collection = polydb_meta.get("collection") or polydb_meta.get("collection_name")
+            if collection:
+                return self._sanitize_table_name(str(collection))
+
+        # Last resort
+        return os.getenv("AZURE_TABLE_NAME", "defaulttable") or "defaulttable"
+
+    def _get_table_client(self, model: type):
+        """
+        Get table client + automatically create the table if it doesn't exist.
+        This is the recommended pattern for Azure Table Storage.
+        """
+        table_name = self._get_table_name(model)
+
+        try:
+            # This is the key call - creates the table if missing
+            self._client.create_table_if_not_exists(table_name)
+            logger.info(f"✅ Azure Table ensured/created: {table_name}")
+        except Exception as e:
+            # TableAlreadyExists is normal and safe to ignore
+            if "TableAlreadyExists" not in str(e) and "already exists" not in str(e).lower():
+                logger.warning(f"Could not create table {table_name}: {e}")
+
+        # Now return the client
+        return self._client.get_table_client(table_name=table_name)
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
-            if not self._table_client:
-                raise NoSQLError("Azure Table client not initialized")
-
+            self._table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
 
@@ -404,7 +452,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                     elif isinstance(v, datetime):
                         reference_entity[k] = v
-
+                self._table_client = self._get_table_client(model)
                 self._table_client.upsert_entity(reference_entity)
 
                 logger.info(f"Stored in blob: {blob_key} ({payload_size // 1024} KB)")
@@ -437,12 +485,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _get_raw(self, model: type, pk: str, rk: str) -> Optional[JsonDict]:
         try:
-            if not self._table_client:
-                return None
-
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
-
+            self._table_client = self._get_table_client(model)
             entity = self._table_client.get_entity(safe_pk, safe_rk)
             entity_dict = dict(entity)
 
@@ -487,9 +532,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self, model: type, filters: Dict[str, Any], limit: Optional[int]
     ) -> List[JsonDict]:
         try:
-            if not self._table_client:
-                return []
-
+            self._table_client = self._get_table_client(model)
             # always enforce model filter
             eff_filters = dict(filters or {})
             eff_filters[_MODEL_FIELD] = model.__qualname__
@@ -576,9 +619,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _delete_raw(self, model: type, pk: str, rk: str, etag: Optional[str]) -> JsonDict:
         try:
-            if not self._table_client:
-                return {"deleted": False}
-
+            self._table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
 
