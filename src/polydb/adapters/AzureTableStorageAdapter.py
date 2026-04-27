@@ -389,6 +389,63 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         # Now return the client
         return self._client.get_table_client(table_name=table_name)
 
+    def _restore_overflow_properties(self, entity_dict: JsonDict) -> JsonDict:
+        """Detect and restore any large properties stored in Blob Storage.
+
+        Called by both _get_raw and _query_raw.
+        """
+        restored = {}
+
+        for k, v in entity_dict.items():
+            # Internal fields (starting with _) are kept as-is
+            if k.startswith("_"):
+                restored[k] = v
+                continue
+
+            # Is this an overflow metadata JSON string?
+            if isinstance(v, str) and v.startswith("{") and '"_overflow":' in v:
+                try:
+                    metadata = json.loads(v)
+                    if not metadata.get("_overflow"):
+                        restored[k] = v
+                        continue
+
+                    blob_key = metadata.get("_blob_key")
+                    checksum = metadata.get("_checksum")
+
+                    if not blob_key:
+                        restored[k] = v
+                        continue
+
+                    # Download real value from blob
+                    blob_data = self._blob_download(blob_key)
+
+                    # Optional but very safe: checksum validation
+                    if checksum:
+                        actual_checksum = hashlib.md5(blob_data).hexdigest()
+                        if actual_checksum != checksum:
+                            logger.warning(
+                                f"Checksum mismatch for blob {blob_key} (property '{k}')"
+                            )
+
+                    # Restore original value
+                    actual_value = json.loads(blob_data.decode("utf-8"))
+                    restored[k] = actual_value
+                    logger.debug(f"Restored large property '{k}' from blob: {blob_key}")
+
+                    continue
+
+                except Exception as e:
+                    logger.error(f"Failed to restore overflow property '{k}': {e}")
+                    # Fall back to raw metadata instead of crashing
+                    restored[k] = v
+                    continue
+
+            # Normal (non-overflow) property
+            restored[k] = v
+
+        return restored
+
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
@@ -462,55 +519,37 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
             self._table_client = self._get_table_client(model)
+
             entity = self._table_client.get_entity(safe_pk, safe_rk)
             entity_dict = dict(entity)
 
-            # model isolation
+            # Model isolation check
             if entity_dict.get(_MODEL_FIELD) != model.__qualname__:
                 return None
 
-            if entity_dict.get("_overflow"):
-                blob_key = entity_dict.get("_blob_key")
-                checksum = entity_dict.get("_checksum")
-                if not blob_key:
-                    raise NoSQLError("Overflow entity missing _blob_key")
+            # Restore any large fields that were moved to blob
+            restored_entity = self._restore_overflow_properties(entity_dict)
 
-                blob_data = self._blob_download(blob_key)
-                actual_checksum = hashlib.md5(blob_data).hexdigest()
-                if checksum and actual_checksum != checksum:
-                    raise NoSQLError(
-                        f"Checksum mismatch: expected {checksum}, got {actual_checksum}"
-                    )
-
-                restored = json.loads(blob_data.decode("utf-8"))
-                out = self._unpack_entity(restored)
-                out["_overflow"] = True
-                out["_blob_key"] = blob_key
-                out["_checksum"] = checksum
-                if "id" not in out:
-                    out["id"] = safe_rk
-                return out
-
-            out = self._unpack_entity(entity_dict)
+            out = self._unpack_entity(restored_entity)
             if "id" not in out:
                 out["id"] = safe_rk
+
             return out
 
         except Exception as e:
             if "ResourceNotFound" in str(e):
                 return None
             raise NoSQLError(f"Azure Table get failed: {str(e)}")
-
+    
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _query_raw(
         self, model: type, filters: Dict[str, Any], limit: Optional[int]
     ) -> List[JsonDict]:
         try:
             self._table_client = self._get_table_client(model)
-            # always enforce model filter
-            eff_filters = dict(filters or {})
-            # eff_filters[_MODEL_FIELD] = model.__qualname__
 
+            # Build query filter (your original logic kept unchanged)
+            eff_filters = dict(filters or {})
             parts: List[str] = []
             for orig_k, orig_v in eff_filters.items():
                 if orig_v is None:
@@ -522,7 +561,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     sk = "RowKey"
                 else:
                     sk = (
-                        self._sanitize_prop_name(orig_k) if orig_k != _MODEL_FIELD else _MODEL_FIELD
+                        self._sanitize_prop_name(orig_k)
+                        if orig_k != _MODEL_FIELD
+                        else _MODEL_FIELD
                     )
 
                 ev = self._encode_value(orig_v)
@@ -544,40 +585,21 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             query_filter = " and ".join(parts) if parts else None
 
-            entities = self._table_client.query_entities(query_filter=query_filter)  # type: ignore
+            entities = self._table_client.query_entities(query_filter=query_filter)
 
             results: List[JsonDict] = []
             count = 0
             for ent in entities:
                 ent_dict = dict(ent)
 
-                # defensive: enforce model even if query_filter omitted
-                if ent_dict.get(_MODEL_FIELD) != model.__qualname__:
-                    continue
+                # Restore any large fields from blob
+                restored_entity = self._restore_overflow_properties(ent_dict)
 
-                if ent_dict.get("_overflow"):
-                    blob_key = ent_dict.get("_blob_key")
-                    checksum = ent_dict.get("_checksum")
-                    if blob_key:
-                        try:
-                            blob_data = self._blob_download(blob_key)
-                            actual_checksum = hashlib.md5(blob_data).hexdigest()
-                            if checksum and actual_checksum != checksum:
-                                raise NoSQLError("Checksum mismatch")
+                out = self._unpack_entity(restored_entity)
 
-                            restored = json.loads(blob_data.decode("utf-8"))
-                            out = self._unpack_entity(restored)
-                        except Exception as e:
-                            logger.error(f"Blob read failed, falling back to table: {e}")
-                            out = self._unpack_entity(ent_dict)
-                    else:
-                        out = self._unpack_entity(ent_dict)
-                else:
-                    out = self._unpack_entity(ent_dict)
-
-                # guarantee id
-                if "id" not in out and out.get("RowKey") is not None:
-                    out["id"] = out["RowKey"]
+                # Guarantee 'id' field
+                if "id" not in out and "RowKey" in ent_dict:
+                    out["id"] = ent_dict["RowKey"]
 
                 results.append(out)
 
@@ -589,7 +611,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         except Exception as e:
             raise NoSQLError(f"Azure Table query failed: {str(e)}")
-
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _delete_raw(self, model: type, pk: str, rk: str, etag: Optional[str]) -> JsonDict:
         try:

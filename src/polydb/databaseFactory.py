@@ -554,18 +554,38 @@ class DatabaseFactory:
         after_plain = None
         success = False
         error: Optional[str] = None
-
         def _op() -> JsonDict:
             nonlocal after_plain, success
             if self._is_sql(meta, engine_override):
                 result = adapters.sql.update(meta.table, entity_id, data)
             else:
+                pkey = data.get("PartitionKey") or data.get("partition_key") or data.get("pk")
+                en_id = entity_id
+                if not pkey and before:
+                    pkey = (
+                        before.get("PartitionKey")
+                        or before.get("partition_key")
+                        or before.get("pk")
+                    )
+                if pkey:
+                    if isinstance(en_id, dict):
+                        en_pk = (
+                            en_id.get("PartitionKey")
+                            or en_id.get("partition_key")
+                            or en_id.get("pk")
+                        )
+                        if not en_pk:
+                            en_id["partition_key"] = pkey
+                    elif isinstance(en_id, str):
+                        en_id = {"partition_key": pkey, "id": entity_id}
+
                 cls = (
                     model
                     if isinstance(model, type)
                     else type(name, (), {"__polydb__": meta.__dict__})
                 )
-                result = adapters.nosql.patch(cls, entity_id, data, etag=etag, replace=replace)
+
+                result = adapters.nosql.patch(cls, en_id, data, etag=etag, replace=replace)
             after_plain = result
             if self.encryption and encrypted_fields:
                 after_plain = self.encryption.decrypt_fields(result, encrypted_fields)

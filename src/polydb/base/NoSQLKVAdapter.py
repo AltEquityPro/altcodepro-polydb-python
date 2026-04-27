@@ -258,7 +258,7 @@ class NoSQLKVAdapter:
             rk = entity_id.get("row_key") or entity_id.get("rk") or entity_id.get("id")
 
         else:
-            pk, rk = self._get_pk_rk(model, {"id": entity_id})
+            pk, rk = self._get_pk_rk(model, {"id": entity_id, **data})
 
         if not replace:
             existing = self._get_raw(model, pk, rk)  # type: ignore
