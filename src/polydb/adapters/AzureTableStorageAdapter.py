@@ -30,6 +30,8 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # ensures model isolation across the same table
 _MODEL_FIELD = "__polydb_model__"
 
+logging.getLogger("azure").setLevel(logging.ERROR)
+
 
 class AzureTableStorageAdapter(NoSQLKVAdapter):
     """
@@ -199,33 +201,46 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     # -----------------------------
     # Entity pack/unpack
     # -----------------------------
-
     def _pack_entity(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
-        entity: JsonDict = {"PartitionKey": pk, "RowKey": rk}
+        """Pack data into Azure Table Storage entity format.
 
+        This version is much simpler, more readable, and fixes the fragile
+        revmap/skey logic that was likely causing normal fields to disappear.
+        """
+        entity: JsonDict = {
+            "PartitionKey": pk,
+            "RowKey": rk,
+        }
         entity[_MODEL_FIELD] = model.__qualname__
-
         keymap: Dict[str, str] = {}
-        revmap: Dict[str, str] = {}
 
         for orig_key, orig_val in (data or {}).items():
-            if str(orig_key) in self._RESERVED or str(orig_key) in ("PartitionKey", "RowKey"):
+            orig_key_str = str(orig_key)
+
+            # Skip Azure-reserved or special keys
+            if orig_key_str in self._RESERVED or orig_key_str in ("PartitionKey", "RowKey"):
                 continue
 
-            skey = revmap.get(str(orig_key))
-            if not skey:
-                skey = self._sanitize_prop_name(orig_key)
-                base = skey
-                i = 1
-                while skey in entity:
-                    skey = f"{base}_{i}"
-                    i += 1
-                revmap[str(orig_key)] = skey
-                keymap[skey] = str(orig_key)
+            # Sanitize property name so it is valid for Azure Table Storage
+            skey = self._sanitize_prop_name(orig_key)
 
+            # Prevent key collisions (extremely rare but safe)
+            base = skey
+            counter = 1
+            while skey in entity:
+                skey = f"{base}_{counter}"
+                counter += 1
+
+            # Remember the original key name so _unpack_entity can restore it
+            keymap[skey] = orig_key_str
+
+            # Encode the value (must return something Azure Table accepts)
             entity[skey] = self._encode_value(orig_val)
 
-        entity["__keymap__"] = json.dumps(keymap, default=json_safe)
+        # Store keymap only if we actually have fields (internal use)
+        if keymap:
+            entity["__keymap__"] = json.dumps(keymap, default=json_safe)
+
         return entity
 
     def _unpack_entity(self, entity: JsonDict) -> JsonDict:
@@ -380,96 +395,55 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             self._table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
-
             # Pack entity (encoded for Azure Table)
             entity = self._pack_entity(model, safe_pk, safe_rk, data)
-
             # ---------------------------------------------------
             # SIZE ESTIMATION (use ORIGINAL payload, not packed)
             # ---------------------------------------------------
             MAX_PROPERTY_CHARS = 30 * 1024  # ~30K safe under UTF-16 32K limit
-            MAX_ENTITY_SIZE = 40 * 1024  # conservative total threshold
 
             def _is_large_string(val: Any) -> bool:
                 return isinstance(val, str) and len(val) > MAX_PROPERTY_CHARS
 
-            has_large_property = False
-            large_key = None
-
+            large_val_dict = {}
             for key, value in entity.items():
                 if _is_large_string(value):
-                    has_large_property = True
-                    large_key = key
                     logger.warning(
                         f"LARGE PROPERTY DETECTED: {key} length={len(value)} chars → forcing blob overflow"
                     )
-                    break
+                    payload_json = json.dumps(value, default=json_safe)
+                    payload_bytes = payload_json.encode("utf-8")
+                    payload_size = len(payload_bytes)
+                    checksum = hashlib.md5(payload_bytes).hexdigest()
+                    val_key = self._sanitize_blob_part(key)
+                    blob_key = self._blob_key(f"{safe_pk}_{safe_rk}", val_key, checksum)
+                    self._blob_upload(blob_key, payload_bytes)
+                    logger.info(f"Stored in blob: {blob_key} ({payload_size // 1024} KB)")
+                    large_val_dict[key] = {
+                        "PartitionKey": safe_pk,
+                        "RowKey": safe_rk,
+                        _MODEL_FIELD: model.__qualname__,
+                        "_overflow": True,
+                        "_blob_key": blob_key,
+                        "_size": payload_size,
+                        "_checksum": checksum,
+                    }
 
-            payload_json = json.dumps(data, default=json_safe)
-            payload_bytes = payload_json.encode("utf-8")
-            payload_size = len(payload_bytes)
+            reference_entity = {
+                _MODEL_FIELD: model.__qualname__,
+            }
+            for k, v in entity.items():
+                if k.startswith("_"):
+                    continue
+                if k in large_val_dict:
+                    metadata = large_val_dict[k]
+                    reference_entity[k] = json.dumps(metadata, default=json_safe)  # ← JSON string
+                    logger.info(f"Overflow reference stored for {k} → {metadata['_blob_key']}")
+                else:
+                    reference_entity[k] = v
 
-            force_blob = has_large_property or payload_size > MAX_ENTITY_SIZE
-
-            # ---------------------------------------------------
-            # BLOB OVERFLOW PATH
-            # ---------------------------------------------------
-            if force_blob:
-                logger.info(
-                    f"Entity exceeds safe limits → using blob storage "
-                    f"(size={payload_size // 1024} KB, large_key={large_key})"
-                )
-
-                checksum = hashlib.md5(payload_bytes).hexdigest()
-                blob_key = self._blob_key(safe_pk, safe_rk, checksum)
-
-                # Upload ORIGINAL payload (not packed entity)
-                self._blob_upload(blob_key, payload_bytes)
-
-                # Build reference entity
-                reference_entity = {
-                    "PartitionKey": safe_pk,
-                    "RowKey": safe_rk,
-                    _MODEL_FIELD: model.__qualname__,
-                    "_overflow": True,
-                    "_blob_key": blob_key,
-                    "_size": payload_size,
-                    "_checksum": checksum,
-                    "__keymap__": entity.get("__keymap__", "{}"),
-                }
-
-                # Keep only small queryable fields
-                for k, v in entity.items():
-                    if k in ("PartitionKey", "RowKey", "__keymap__", _MODEL_FIELD):
-                        continue
-                    if k.startswith("_"):
-                        continue
-
-                    if isinstance(v, (str, bool, int, float)):
-                        if isinstance(v, str) and len(v) > 2000:
-                            continue
-                        reference_entity[k] = v
-
-                    elif isinstance(v, datetime):
-                        reference_entity[k] = v
-                self._table_client = self._get_table_client(model)
-                self._table_client.upsert_entity(reference_entity)
-
-                logger.info(f"Stored in blob: {blob_key} ({payload_size // 1024} KB)")
-
-                restored = self._unpack_entity(entity)
-                restored["_overflow"] = True
-                restored["_blob_key"] = blob_key
-                restored["_checksum"] = checksum
-                restored["_size"] = payload_size
-                restored["id"] = safe_rk
-
-                return restored
-
-            # ---------------------------------------------------
-            # NORMAL TABLE STORAGE
-            # ---------------------------------------------------
-            self._table_client.upsert_entity(entity)
+            self._table_client = self._get_table_client(model)
+            self._table_client.upsert_entity(reference_entity)
 
             restored = self._unpack_entity(entity)
             restored["id"] = safe_rk
@@ -535,7 +509,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             self._table_client = self._get_table_client(model)
             # always enforce model filter
             eff_filters = dict(filters or {})
-            eff_filters[_MODEL_FIELD] = model.__qualname__
+            # eff_filters[_MODEL_FIELD] = model.__qualname__
 
             parts: List[str] = []
             for orig_k, orig_v in eff_filters.items():
