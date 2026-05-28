@@ -124,7 +124,7 @@ class PostgreSQLAdapter:
         # If column is JSONB, Postgres will still accept Json(list).
         # But for TEXT[] columns we must send Python list.
         if isinstance(v, list):
-            return v
+            return Json(v)
 
         # Datetime / date
         if isinstance(v, (datetime, date)):
