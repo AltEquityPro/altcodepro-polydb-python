@@ -8,7 +8,7 @@ import hashlib
 from contextlib import contextmanager
 import json
 from datetime import datetime, date
-from psycopg2.extras import Json
+
 
 from ..errors import DatabaseError, ConnectionError
 from ..retry import retry
@@ -111,6 +111,7 @@ class PostgreSQLAdapter:
         - Decimal -> convert to float
         - everything else -> pass as-is
         """
+        from psycopg2.extras import Json
 
         if v is None:
             return None

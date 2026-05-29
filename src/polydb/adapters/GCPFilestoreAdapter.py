@@ -1,4 +1,4 @@
-# src/polydb/adapters/EFSAdapter.py
+# src/polydb/adapters/GCPFilestoreAdapter.py
 
 import os
 from typing import List, Optional
@@ -7,10 +7,10 @@ from ..base.SharedFilesAdapter import SharedFilesAdapter
 from ..errors import StorageError, ConnectionError
 
 
-class EFSAdapter(SharedFilesAdapter):
+class FilestoreAdapter(SharedFilesAdapter):
     """
-    AWS EFS — managed NFS mounted onto the host at a path (e.g. /mnt/efs).
-    Once mounted it's an ordinary POSIX directory, so ops are plain os/open calls.
+    GCP Filestore — managed NFS mounted onto the host at a path (e.g. /mnt/filestore).
+    Like EFS, it's a POSIX directory once mounted, so ops are plain os/open calls.
 
     - per-call `share_name` selects a sub-root directory under the mount point
     - paths are confined to the resolved root (no traversal escapes)
@@ -18,9 +18,9 @@ class EFSAdapter(SharedFilesAdapter):
 
     def __init__(self, mount_point: str = ""):
         super().__init__()
-        self.mount_point = mount_point or os.getenv("EFS_MOUNT_POINT", "/mnt/efs")
+        self.mount_point = mount_point or os.getenv("FILESTORE_MOUNT_POINT", "/mnt/filestore")
         if not self.mount_point:
-            raise ConnectionError("EFS mount_point is required")
+            raise ConnectionError("Filestore mount_point is required")
 
     def _resolve(self, path: str, share_name: Optional[str] = None) -> str:
         base = os.path.join(self.mount_point, share_name) if share_name else self.mount_point
@@ -41,7 +41,7 @@ class EFSAdapter(SharedFilesAdapter):
         except StorageError:
             raise
         except Exception as e:
-            raise StorageError(f"EFS write failed: {str(e)}")
+            raise StorageError(f"Filestore write failed: {str(e)}")
 
     def read(self, path: str, share_name: Optional[str] = None) -> bytes | None:
         try:
@@ -52,7 +52,7 @@ class EFSAdapter(SharedFilesAdapter):
         except StorageError:
             raise
         except Exception as e:
-            raise StorageError(f"EFS read failed: {str(e)}")
+            raise StorageError(f"Filestore read failed: {str(e)}")
 
     def delete(self, path: str, share_name: Optional[str] = None) -> bool:
         try:
@@ -63,7 +63,7 @@ class EFSAdapter(SharedFilesAdapter):
         except StorageError:
             raise
         except Exception as e:
-            raise StorageError(f"EFS delete failed: {str(e)}")
+            raise StorageError(f"Filestore delete failed: {str(e)}")
 
     def list(self, directory: str = "", share_name: Optional[str] = None) -> List[str]:
         try:
@@ -74,4 +74,4 @@ class EFSAdapter(SharedFilesAdapter):
         except StorageError:
             raise
         except Exception as e:
-            raise StorageError(f"EFS list failed: {str(e)}")
+            raise StorageError(f"Filestore list failed: {str(e)}")

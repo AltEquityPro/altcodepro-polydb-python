@@ -7,8 +7,6 @@ import re
 
 from typing import Any, Dict, List, Optional
 
-from azure.storage.queue import QueueServiceClient, QueueClient
-from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
@@ -35,8 +33,8 @@ class AzureQueueAdapter(QueueAdapter):
         if not self.connection_string:
             raise ConnectionError("AZURE_STORAGE_CONNECTION_STRING is not configured")
 
-        self._client: Optional[QueueServiceClient] = None
-        self._queues: Dict[str, QueueClient] = {}
+        self._client = None
+        self._queues = {}
 
         self._lock = threading.Lock()
 
@@ -50,6 +48,8 @@ class AzureQueueAdapter(QueueAdapter):
 
     def _initialize_client(self) -> None:
         """Initialize Azure Queue client"""
+        from azure.storage.queue import QueueServiceClient
+
         try:
             with self._lock:
                 if self._client is not None:
@@ -63,8 +63,10 @@ class AzureQueueAdapter(QueueAdapter):
         except Exception as e:
             raise ConnectionError(f"Failed to initialize Azure Queue Storage: {e}")
 
-    def _get_queue(self, queue_name: str) -> QueueClient:
+    def _get_queue(self, queue_name: str):
         """Get or create queue client"""
+        from azure.core.exceptions import ResourceExistsError
+
         if self._client is None:
             raise ConnectionError("Azure Queue client not initialized")
         queue_name = self._normalize_queue_name(queue_name)
@@ -123,6 +125,8 @@ class AzureQueueAdapter(QueueAdapter):
 
     def delete(self, message_id: str, queue_name: str = "default", pop_receipt: str = "") -> bool:
         """Delete message from queue"""
+        from azure.core.exceptions import ResourceNotFoundError
+
         try:
             queue_name = self._normalize_queue_name(queue_name)
             queue_client = self._get_queue(queue_name)

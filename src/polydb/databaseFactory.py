@@ -554,6 +554,7 @@ class DatabaseFactory:
         after_plain = None
         success = False
         error: Optional[str] = None
+
         def _op() -> JsonDict:
             nonlocal after_plain, success
             if self._is_sql(meta, engine_override):
@@ -866,8 +867,11 @@ class DatabaseFactory:
         media_type: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
         storage_name: str = "azure",
+        container_name: Optional[str] = None,
     ) -> str:
-        storage = self._engines[0].cloud_factory.get_object_storage(storage_name)
+        storage = self._engines[0].cloud_factory.get_object_storage(
+            storage_name, container_name=container_name
+        )
         return storage.put(
             key=key,
             data=data,
@@ -877,16 +881,28 @@ class DatabaseFactory:
             metadata=metadata or {},
         )
 
-    def download_blob(self, key: str, *, storage_name: str = "azure") -> Optional[bytes]:
-        storage = self._engines[0].cloud_factory.get_object_storage(storage_name)
+    def download_blob(
+        self, key: str, *, storage_name: str = "azure", container_name: Optional[str] = None
+    ) -> Optional[bytes]:
+        storage = self._engines[0].cloud_factory.get_object_storage(
+            storage_name, container_name=container_name
+        )
         return storage.get(key)
 
-    def delete_blob(self, key: str, *, storage_name: str = "azure") -> bool:
-        storage = self._engines[0].cloud_factory.get_object_storage(storage_name)
+    def delete_blob(
+        self, key: str, *, storage_name: str = "azure", container_name: Optional[str] = None
+    ) -> bool:
+        storage = self._engines[0].cloud_factory.get_object_storage(
+            storage_name, container_name=container_name
+        )
         return storage.delete(key)
 
-    def list_blob(self, prefix: str = "", *, storage_name: str = "azure") -> List[str]:
-        storage = self._engines[0].cloud_factory.get_object_storage(storage_name)
+    def list_blob(
+        self, prefix: str = "", *, storage_name: str = "azure", container_name: Optional[str] = None
+    ) -> List[str]:
+        storage = self._engines[0].cloud_factory.get_object_storage(
+            storage_name, container_name=container_name
+        )
         return storage.list(prefix)
 
     # ══════════════════════════════════════════════════════════════════════

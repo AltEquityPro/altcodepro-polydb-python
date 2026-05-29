@@ -9,9 +9,7 @@ import threading
 from polydb.errors import DatabaseError
 from typing import Any, Dict, List, Optional, Tuple
 
-from boto3.dynamodb.conditions import Attr, Key
-from botocore.exceptions import ClientError
-from boto3.session import Session
+
 from ..base.NoSQLKVAdapter import NoSQLKVAdapter
 from ..errors import ConnectionError, NoSQLError
 from ..json_safe import json_safe
@@ -78,6 +76,9 @@ class DynamoDBAdapter(NoSQLKVAdapter):
     # ---------------------------------------------------------------------
 
     def _initialize_clients(self) -> None:
+
+        from boto3.session import Session
+
         try:
             with self._lock:
                 if self._dynamodb and self._s3:
@@ -120,6 +121,9 @@ class DynamoDBAdapter(NoSQLKVAdapter):
         Ensure PK/SK table exists. Safe in prod (no-op if exists).
         Required for LocalStack integration tests.
         """
+        from boto3.dynamodb.conditions import Attr, Key
+        from botocore.exceptions import ClientError
+
         if not self._dynamodb:
             return
 
@@ -307,6 +311,9 @@ class DynamoDBAdapter(NoSQLKVAdapter):
         Prefer Query when PK can be derived. Otherwise Scan.
         Supports filters like {"id": "..."} and arbitrary Attr equality.
         """
+        from boto3.dynamodb.conditions import Attr, Key
+        from botocore.exceptions import ClientError
+
         try:
             table = self._get_table(model)
             filters = filters or {}
@@ -412,6 +419,8 @@ class DynamoDBAdapter(NoSQLKVAdapter):
         results until page_size items are returned
         - continuation_token = base64(json(LastEvaluatedKey))
         """
+        from boto3.dynamodb.conditions import Attr, Key
+
         try:
             table = self._get_table(model)
             query = query or {}

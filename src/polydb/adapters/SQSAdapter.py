@@ -5,8 +5,6 @@ import os
 import threading
 from typing import Any, Dict, List
 
-import boto3
-from botocore.exceptions import ClientError
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
@@ -39,6 +37,8 @@ class SQSAdapter(QueueAdapter):
     # ---------------------------------------------------------
 
     def _initialize_client(self):
+        import boto3
+
         try:
             with self._lock:
                 if self._client:
@@ -67,6 +67,9 @@ class SQSAdapter(QueueAdapter):
 
     def _ensure_queue_exists(self, queue_name: str) -> str:
         """Create queue if it does not exist"""
+
+        from botocore.exceptions import ClientError
+
         if not self._client:
             raise ConnectionError("SQS client not initialized")
 

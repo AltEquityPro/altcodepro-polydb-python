@@ -2,7 +2,7 @@ from polydb.utils import setup_logger
 
 
 from abc import ABC, abstractmethod
-from typing import List
+from typing import List, Optional
 
 
 class SharedFilesAdapter(ABC):
@@ -12,21 +12,21 @@ class SharedFilesAdapter(ABC):
         self.logger = setup_logger(self.__class__.__name__)
 
     @abstractmethod
-    def write(self, path: str, data: bytes) -> bool:
+    def write(self, path: str, data: bytes, share_name: Optional[str] = None) -> bool:
         """Write file"""
         pass
 
     @abstractmethod
-    def read(self, path: str) -> bytes | None:
+    def read(self, path: str, share_name: Optional[str] = None) -> bytes | None:
         """Read file"""
         pass
 
     @abstractmethod
-    def delete(self, path: str) -> bool:
+    def delete(self, path: str, share_name: Optional[str] = None) -> bool:
         """Delete file"""
         pass
 
     @abstractmethod
-    def list(self, directory: str = "/") -> List[str]:
+    def list(self, directory: str = "", share_name: Optional[str] = None) -> List[str]:
         """List files in directory"""
         pass

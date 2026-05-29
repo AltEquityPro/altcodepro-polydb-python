@@ -3,14 +3,12 @@ import json
 import threading
 from typing import Any, Dict, List, Optional, Tuple, Union
 
-from google.cloud import pubsub_v1
 from google.api_core.exceptions import AlreadyExists, NotFound
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
 from ..retry import retry
 from ..json_safe import json_safe
-
 
 JsonLike = Union[Dict[str, Any], List[Any], str, int, float, bool, None]
 
@@ -40,13 +38,15 @@ class GCPPubSubAdapter(QueueAdapter):
             "PUBSUB_SUBSCRIPTION", "polydb-sub"
         )
 
-        self._publisher: Optional[pubsub_v1.PublisherClient] = None
-        self._subscriber: Optional[pubsub_v1.SubscriberClient] = None
+        self._publisher = None
+        self._subscriber = None
         self._lock = threading.Lock()
 
         self._initialize_clients()
 
     def _initialize_clients(self) -> None:
+        from google.cloud import pubsub_v1
+
         try:
             with self._lock:
                 if self._publisher and self._subscriber:

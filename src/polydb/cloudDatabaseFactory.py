@@ -4,6 +4,8 @@ import os
 import threading
 from typing import Dict, List, Optional
 
+from .base import SharedFilesAdapter
+
 from .adapters.AzureFileStorageAdapter import AzureFileStorageAdapter
 from .adapters.EFSAdapter import EFSAdapter
 from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
@@ -43,7 +45,6 @@ from .adapters.GCPPubSubAdapter import GCPPubSubAdapter
 from .adapters.VercelQueueAdapter import VercelQueueAdapter
 from .adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
 from .adapters.SQSAdapter import SQSAdapter
-
 
 # ============================================================
 # FACTORY
@@ -106,7 +107,9 @@ class CloudDatabaseFactory:
     # OBJECT STORAGE
     # --------------------------------------------------------
     def get_object_storage(
-        self, name: str = "azure"
+        self,
+        name: str = "azure",
+        container_name: Optional[str] = None,
     ) -> (
         AzureBlobStorageAdapter
         | S3CompatibleAdapter
@@ -115,13 +118,12 @@ class CloudDatabaseFactory:
         | BlockchainBlobAdapter
     ):
         with self._lock:
-            if name in self.instances:
-                return self.instances[name]
+            # cache per (name, container) so different containers don't collide
+            cache_key = f"object::{name}::{container_name or ''}"
+            if cache_key in self.instances:
+                return self.instances[cache_key]
 
-            cfg = self.configs.get(name)
-            if not cfg:
-                cfg = StorageConfig(provider=self.provider, name=name)
-
+            cfg = self.configs.get(name) or StorageConfig(provider=self.provider, name=name)
             provider = cfg.provider
 
             # ---------------- AZURE ----------------
@@ -130,10 +132,11 @@ class CloudDatabaseFactory:
 
                 connection_string = None
                 container = None
-
                 if isinstance(cfg, AzureStorageConfig):
                     connection_string = cfg.connection_string
                     container = cfg.container
+
+                container = container_name or container  # per-call overrides config/env
 
                 instance = AzureBlobStorageAdapter(
                     connection_string=connection_string or "",
@@ -157,7 +160,7 @@ class CloudDatabaseFactory:
                     bucket = cfg.bucket
                     project_id = cfg.project_id
                     endpoint = cfg.endpoint
-
+                bucket = container_name or bucket  # container_name doubles as bucket override
                 instance = GCPStorageAdapter(
                     project_id=project_id, endpoint=endpoint, bucket_name=bucket
                 )
@@ -168,21 +171,16 @@ class CloudDatabaseFactory:
 
                 token = None
                 timeout = 10
-
                 if isinstance(cfg, VercelStorageConfig):
                     token = cfg.token
                     timeout = cfg.timeout
-
                 instance = VercelBlobAdapter(token=token or "", timeout=timeout)
 
             # ---------------- BLOCKCHAIN ----------------
             elif provider == CloudProvider.BLOCKCHAIN:
                 from .adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
 
-                ipfs_url = None
-                if isinstance(cfg, BlockchainStorageConfig):
-                    ipfs_url = cfg.ipfs_url
-
+                ipfs_url = cfg.ipfs_url if isinstance(cfg, BlockchainStorageConfig) else None
                 instance = BlockchainBlobAdapter(ipfs_url=ipfs_url)
 
             # ---------------- DEFAULT ----------------
@@ -192,7 +190,7 @@ class CloudDatabaseFactory:
                 self.logger.warning(f"Fallback to S3-compatible for provider={provider}")
                 instance = S3CompatibleAdapter()
 
-            self.instances[name] = instance
+            self.instances[cache_key] = instance
             return instance
 
     # --------------------------------------------------------
@@ -440,82 +438,55 @@ class CloudDatabaseFactory:
             self.instances["queue"] = instance
             return instance
 
-    def get_files(
-        self, name: str = "files"
-    ) -> (
-        AzureFileStorageAdapter
-        | EFSAdapter
-        | GCPStorageAdapter
-        | AzureBlobStorageAdapter
-        | S3CompatibleAdapter
-        | VercelBlobAdapter
-        | BlockchainBlobAdapter
-    ):
+    def get_files(self, name: str = "files"):
         with self._lock:
             if name in self.instances:
                 return self.instances[name]
 
-            cfg = self.configs.get(name)
-            if not cfg:
-                cfg = StorageConfig(provider=self.provider, name=name)
+            cfg = self.configs.get(name) or StorageConfig(provider=self.provider, name=name)
 
-            # ---------------- AZURE FILE STORAGE ----------------
             if cfg.provider == CloudProvider.AZURE:
                 from .adapters.AzureFileStorageAdapter import AzureFileStorageAdapter
 
                 connection_string = ""
                 share_name = ""
-
                 if isinstance(cfg, AzureFileConfig):
                     connection_string = cfg.connection_string or ""
                     share_name = cfg.share_name or ""
-
                 instance = AzureFileStorageAdapter(
-                    connection_string=connection_string,
-                    share_name=share_name,
+                    connection_string=connection_string, share_name=share_name
                 )
 
-            # ---------------- AWS EFS ----------------
             elif cfg.provider == CloudProvider.AWS:
                 from .adapters.EFSAdapter import EFSAdapter
 
-                mount_point = None
-                if isinstance(cfg, EFSFileConfig):
-                    mount_point = cfg.mount_path
+                mount_point = cfg.mount_path if isinstance(cfg, EFSFileConfig) else None
+                instance = EFSAdapter(mount_point=mount_point or "")
 
-                instance = EFSAdapter(
-                    mount_point=mount_point or os.getenv("EFS_MOUNT_POINT", "/mnt/efs")
-                )
-
-            # ---------------- GCP STORAGE (FILES VIA BUCKET) ----------------
             elif cfg.provider == CloudProvider.GCP:
-                from .adapters.GCPStorageAdapter import GCPStorageAdapter
+                from .adapters.GCPFilestoreAdapter import FilestoreAdapter
 
-                project_id = os.getenv("GOOGLE_CLOUD_PROJECT", "")
-                endpoint = os.getenv("GCP_STORAGE_ENDPOINT")  # optional (for emulator)
-                bucket = None
+                mount_point = getattr(cfg, "mount_path", None)
+                instance = FilestoreAdapter(mount_point=mount_point or "")
 
-                if isinstance(cfg, GCPFileConfig):
-                    bucket = cfg.bucket
-
-                instance = GCPStorageAdapter(
-                    project_id=project_id,
-                    endpoint=endpoint,
-                    bucket_name=bucket,
-                )
-
-            # ---------------- VERCEL (fallback to blob) ----------------
             elif cfg.provider == CloudProvider.VERCEL:
-                # Vercel has no file system → reuse blob adapter
-                instance = self.get_object_storage(name)
+                from .adapters.VercelFileAdapter import VercelFileAdapter
 
-            # ---------------- BLOCKCHAIN ----------------
+                instance = VercelFileAdapter()
+
             elif cfg.provider == CloudProvider.BLOCKCHAIN:
-                raise NotImplementedError("File storage not supported for blockchain")
+                from .adapters.BlockchainFileAdapter import BlockchainFileAdapter
 
-            # ---------------- DEFAULT ----------------
+                instance = BlockchainFileAdapter(
+                    chain=getattr(cfg, "chain", None),
+                    rpc_url=getattr(cfg, "rpc_url", None),
+                    private_key=getattr(cfg, "private_key", None),
+                    contract_address=getattr(cfg, "contract_address", None),
+                    contract_abi=getattr(cfg, "contract_abi", None),
+                    ipfs_url=getattr(cfg, "ipfs_url", None),
+                )
             else:
-                raise NotImplementedError(f"File storage not supported for {self.provider.value}")
+                raise NotImplementedError(f"File storage not supported for {cfg.provider.value}")
 
             self.instances[name] = instance
             return instance

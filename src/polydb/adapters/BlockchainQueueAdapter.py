@@ -5,8 +5,7 @@ import logging
 import os
 from typing import Any, Dict, List, Optional
 
-from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
+
 from dotenv import load_dotenv
 
 from ..errors import QueueError
@@ -36,6 +35,8 @@ class BlockchainQueueAdapter:
 
         if not self.rpc_url:
             raise RuntimeError("BLOCKCHAIN_RPC_URL not configured")
+        from web3 import Web3
+        from web3.middleware import ExtraDataToPOAMiddleware
 
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
         self.w3.middleware_onion.inject(ExtraDataToPOAMiddleware, layer=0)

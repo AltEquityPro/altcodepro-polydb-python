@@ -6,12 +6,7 @@ import json
 import os
 import threading
 from sqlite3 import DatabaseError
-from typing import Any, Dict, List, Optional, Tuple
-
-from google.cloud import firestore
-from google.cloud import storage
-from google.cloud.firestore import Client
-from google.cloud.firestore_v1.base_query import FieldFilter
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ..base.NoSQLKVAdapter import NoSQLKVAdapter
 from ..errors import ConnectionError, NoSQLError
@@ -19,6 +14,10 @@ from ..json_safe import json_safe
 from ..models import PartitionConfig
 from ..retry import retry
 from ..types import JsonDict
+
+if TYPE_CHECKING:  # type-checker only — not imported at runtime
+    from google.cloud import storage
+    from google.cloud.firestore import Client
 
 
 class FirestoreAdapter(NoSQLKVAdapter):
@@ -31,6 +30,10 @@ class FirestoreAdapter(NoSQLKVAdapter):
     - delete() returns {"id": <pk>} and raises DatabaseError on missing
     - query_page() returns (rows, token) with stable pagination
     - Emulator support via FIRESTORE_EMULATOR_HOST
+
+    NOTE: google-cloud-firestore / google-cloud-storage are imported lazily
+    inside the methods that use them, so installing them is only required when
+    this adapter is actually used.
     """
 
     FIRESTORE_MAX_SIZE = 1024 * 1024  # 1MB doc limit (practical)
@@ -66,6 +69,8 @@ class FirestoreAdapter(NoSQLKVAdapter):
     # ---------------------------------------------------------------------
 
     def _initialize_clients(self) -> None:
+        from google.cloud import firestore, storage  # lazy: GCP only
+
         try:
             with self._lock:
                 if self._client:
@@ -242,6 +247,8 @@ class FirestoreAdapter(NoSQLKVAdapter):
         Note: Firestore requires indexes for some compound queries in real GCP.
         Emulator usually allows most.
         """
+        from google.cloud.firestore_v1.base_query import FieldFilter  # lazy: GCP only
+
         try:
             collection = self._get_collection(model)
             query = collection
@@ -312,9 +319,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
             raise NoSQLError(f"Firestore delete failed: {e}")
 
     # ---------------------------------------------------------------------
-    # Pagination helper used by NoSQLKVAdapter.query_page (if it calls _query_page_raw)
-    # If your base calls only _query_raw, you can still add a public query_page method
-    # in NoSQLKVAdapter; but since your tests call gcp_nosql.query_page(...) we provide it.
+    # Pagination
     # ---------------------------------------------------------------------
 
     def query_page(
@@ -327,11 +332,8 @@ class FirestoreAdapter(NoSQLKVAdapter):
     ) -> Tuple[List[JsonDict], Optional[str]]:
         """
         Returns (rows, next_token). Token is last document id from the page.
-
-        Works with your tests:
-          page1, tok = gcp_nosql.query_page(GcpItem, {"tenant_id": tag}, 3)
-          page2, _   = gcp_nosql.query_page(GcpItem, {"tenant_id": tag}, 3, tok)
         """
+        from google.cloud.firestore_v1.base_query import FieldFilter  # lazy: GCP only
 
         try:
             collection = self._get_collection(model)

@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from typing import Any, Dict, List, Optional
 
-import ipfshttpclient
+
 from dotenv import load_dotenv
 
 from ..base.ObjectStorageAdapter import ObjectStorageAdapter

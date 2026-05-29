@@ -4,4 +4,4 @@ from .context import AuditContext
 from .manager import AuditManager
 from .AuditStorage import AuditStorage
 
-__all__ = ['AuditRecord', 'AuditContext', 'AuditManager', 'AuditStorage']
+__all__ = ["AuditRecord", "AuditContext", "AuditManager", "AuditStorage"]

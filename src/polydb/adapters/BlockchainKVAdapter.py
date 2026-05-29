@@ -5,8 +5,7 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from web3 import Web3
-from web3.middleware import ExtraDataToPOAMiddleware
+
 from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
@@ -61,6 +60,8 @@ class BlockchainKVAdapter:
 
         if not self.contract_address:
             raise RuntimeError("BLOCKCHAIN_CONTRACT not configured")
+        from web3 import Web3
+        from web3.middleware import ExtraDataToPOAMiddleware
 
         self.w3 = Web3(Web3.HTTPProvider(self.rpc_url))
 

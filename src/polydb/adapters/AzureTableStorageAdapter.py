@@ -8,6 +8,8 @@ import json
 import base64
 import hashlib
 import threading
+import logging
+
 from datetime import datetime, date
 from decimal import Decimal
 from typing import Any, Dict, List, Optional
@@ -19,7 +21,6 @@ from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
 from ..types import JsonDict
 from ..models import PartitionConfig
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -540,7 +541,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             if "ResourceNotFound" in str(e):
                 return None
             raise NoSQLError(f"Azure Table get failed: {str(e)}")
-    
+
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _query_raw(
         self, model: type, filters: Dict[str, Any], limit: Optional[int]
@@ -561,9 +562,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     sk = "RowKey"
                 else:
                     sk = (
-                        self._sanitize_prop_name(orig_k)
-                        if orig_k != _MODEL_FIELD
-                        else _MODEL_FIELD
+                        self._sanitize_prop_name(orig_k) if orig_k != _MODEL_FIELD else _MODEL_FIELD
                     )
 
                 ev = self._encode_value(orig_v)
@@ -611,6 +610,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         except Exception as e:
             raise NoSQLError(f"Azure Table query failed: {str(e)}")
+
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _delete_raw(self, model: type, pk: str, rk: str, etag: Optional[str]) -> JsonDict:
         try:

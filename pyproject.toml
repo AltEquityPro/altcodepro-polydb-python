@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "altcodepro-polydb-python"
-version = "2.3.9"
+version = "2.3.10"
 description = "Production-ready multi-cloud database abstraction layer with connection pooling, retry logic, and thread safety"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.11"
@@ -47,6 +47,16 @@ dependencies = [
     "redis>=6.4.0",
     "python-dotenv>=1.1.1",
     "azure-storage-queue>=12.15.0",
+    "azure-storage-blob>=12.29.0",
+    "boto3>=1.43.18",
+    "google-cloud-storage>=3.10.1",
+    "azure-storage-file-share>=12.25.0",
+    "azure-data-tables>=12.7.0",
+    "ipfshttpclient>=0.7.0",
+    "web3>=7.16.0",
+    "google-cloud-firestore>=2.27.0",
+    "google-cloud-pubsub>=2.38.0",
+    "pymongo>=4.17.0",
 ]
 
 # Generic/Open-source stack (cheapest option)
