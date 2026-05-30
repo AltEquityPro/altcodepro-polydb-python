@@ -18,6 +18,7 @@ class ObjectStorageAdapter(ABC):
         optimize: bool = True,
         media_type: Optional[str] = None,
         metadata: Dict[str, Any] | None = None,
+        container_name: Optional[str] = None,
     ) -> str:
         """Store object with optional optimization"""
         if optimize and media_type:

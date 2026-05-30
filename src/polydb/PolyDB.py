@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from .advanced_query import AdvancedQueryBuilder, QueryHelper
@@ -22,8 +23,6 @@ from .security import DataMasking, FieldEncryption, RowLevelSecurity
 from .types import JsonDict, Lookup
 from .utils import setup_logger
 from .validation import ModelValidator, SchemaValidator
-
-ModelRef = Union[Type, str]
 
 
 class PolyDB:
@@ -51,6 +50,7 @@ class PolyDB:
         storage_configs: Optional[List[StorageConfig]] = None,
         tenant_registry: Optional[TenantRegistry] = None,
         partition_config: Optional[PartitionConfig] = None,
+        redis_cache_url: Optional[str] = None,
         enable_retries: bool = True,
         enable_audit: bool = True,
         enable_audit_reads: bool = False,
@@ -59,6 +59,7 @@ class PolyDB:
         enable_monitoring: bool = False,
         enable_encryption: bool = False,
         enable_rls: bool = False,
+        soft_delete: bool = True,
     ) -> None:
         self.logger = setup_logger(self.__class__.__name__)
 
@@ -71,7 +72,6 @@ class PolyDB:
             provider=provider,
             cloud_factory=self.cloud,
             engines=engines,
-            tenant_registry=tenant_registry,
             enable_retries=enable_retries,
             enable_audit=enable_audit,
             enable_audit_reads=enable_audit_reads,
@@ -79,7 +79,10 @@ class PolyDB:
             use_redis_cache=use_redis_cache,
             enable_monitoring=enable_monitoring,
             enable_encryption=enable_encryption,
-            enable_rls=enable_rls,
+            soft_delete=soft_delete,
+            redis_cache_url=redis_cache_url
+            or os.getenv("REDIS_CACHE_URL")
+            or os.getenv("REDIS_URL"),
         )
 
         self.partition_config = partition_config
@@ -123,7 +126,7 @@ class PolyDB:
         return self.cloud.get_object_storage(name)
 
     def get_shared_files(self):
-        return self.cloud.get_shared_files()
+        return self.cloud.get_files()
 
     def get_queue(self):
         return self.cloud.get_queue()
@@ -137,7 +140,7 @@ class PolyDB:
 
     def create(
         self,
-        model: ModelRef,
+        model: str,
         data: JsonDict,
         *,
         engine_override: Optional[EngineOverride] = None,
@@ -146,7 +149,7 @@ class PolyDB:
 
     def read(
         self,
-        model: ModelRef,
+        model: str,
         query: Optional[Lookup] = None,
         *,
         limit: Optional[int] = None,
@@ -169,7 +172,7 @@ class PolyDB:
 
     def read_one(
         self,
-        model: ModelRef,
+        model: str,
         query: Lookup,
         *,
         no_cache: bool = False,
@@ -186,7 +189,7 @@ class PolyDB:
 
     def get(
         self,
-        model: ModelRef,
+        model: str,
         entity_id: Any,
         *,
         include_deleted: bool = False,
@@ -203,7 +206,7 @@ class PolyDB:
 
     def read_page(
         self,
-        model: ModelRef,
+        model: str,
         query: Lookup,
         *,
         page_size: int = 100,
@@ -222,7 +225,7 @@ class PolyDB:
 
     def update(
         self,
-        model: ModelRef,
+        model: str,
         entity_id: Any,
         data: JsonDict,
         *,
@@ -241,7 +244,7 @@ class PolyDB:
 
     def upsert(
         self,
-        model: ModelRef,
+        model: str,
         data: JsonDict,
         *,
         replace: bool = False,
@@ -256,7 +259,7 @@ class PolyDB:
 
     def delete(
         self,
-        model: ModelRef,
+        model: str,
         entity_id: Any,
         *,
         etag: Optional[str] = None,
@@ -278,12 +281,12 @@ class PolyDB:
     def query(self) -> QueryBuilder:
         return QueryBuilder()
 
-    def advanced_query(self) -> AdvancedQueryBuilder:
-        return AdvancedQueryBuilder()
+    def advanced_query(self, table: str) -> AdvancedQueryBuilder:
+        return AdvancedQueryBuilder(table)
 
     def query_linq(
         self,
-        model: ModelRef,
+        model: str,
         builder: QueryBuilder,
         *,
         engine_override: Optional[EngineOverride] = None,
@@ -426,7 +429,7 @@ class PolyDB:
         queue_name: str = "default",
         delay: Optional[int] = None,
     ) -> str:
-        queue = self.get_queue()
+        queue: Any = self.get_queue()
         if hasattr(queue, "publish"):
             return queue.publish(queue_name=queue_name, message=message, delay=delay)
         return self.send_queue(message, queue_name=queue_name)
@@ -438,7 +441,7 @@ class PolyDB:
         max_messages: int = 10,
         wait_seconds: int = 5,
     ) -> List[Dict[str, Any]]:
-        queue = self.get_queue()
+        queue: Any = self.get_queue()
         if hasattr(queue, "consume"):
             return queue.consume(
                 queue_name=queue_name,
@@ -492,7 +495,7 @@ class PolyDB:
 
     def set_cache(
         self,
-        model: ModelRef,
+        model: str,
         key: Any,
         value: Any,
         *,
@@ -504,7 +507,7 @@ class PolyDB:
 
     def get_cache(
         self,
-        model: ModelRef,
+        model: str,
         key: Any,
     ) -> Optional[Any]:
         if not self.cache:
@@ -513,7 +516,7 @@ class PolyDB:
 
     def invalidate_cache(
         self,
-        model: ModelRef,
+        model: str,
         key: Optional[Any] = None,
     ) -> None:
         if not self.cache:
@@ -530,7 +533,7 @@ class PolyDB:
 
     def warm_model_cache(
         self,
-        model: ModelRef,
+        model: str,
         queries: List[Any],
         *,
         ttl: int = 300,
@@ -541,7 +544,7 @@ class PolyDB:
 
     def warm_popular_queries(
         self,
-        model: ModelRef,
+        model: str,
         *,
         limit: int = 20,
         ttl: int = 300,
@@ -554,27 +557,27 @@ class PolyDB:
     # BATCH
     # ============================================================
 
-    def bulk_insert(self, model: ModelRef, records: List[JsonDict]) -> BatchResult:
+    def bulk_insert(self, model: str, records: List[JsonDict]) -> BatchResult:
         return self.batch.bulk_insert(model, records)
 
     def bulk_update(
         self,
-        model: ModelRef,
-        updates: List[Tuple[Any, JsonDict]],
+        model: str,
+        updates: List[Dict[str, Any]],  # {entity_id, data}
     ) -> BatchResult:
         return self.batch.bulk_update(model, updates)
 
-    def bulk_delete(self, model: ModelRef, entity_ids: List[Any]) -> BatchResult:
+    def bulk_delete(self, model: str, entity_ids: List[Any]) -> BatchResult:
         return self.batch.bulk_delete(model, entity_ids)
 
     # ============================================================
     # VALIDATION
     # ============================================================
 
-    def validate_model(self, model: ModelRef):
+    def validate_model(self, model: Type):
         return ModelValidator.validate_model(model)
 
-    def validate(self, model: ModelRef) -> None:
+    def validate(self, model: Type) -> None:
         ModelValidator.validate_and_raise(model)
 
     def validate_data(self, model: Any, data: JsonDict):
@@ -672,11 +675,7 @@ class PolyDB:
         self.rls.add_policy(model, name, policy_func, apply_to)
 
     def set_default_rls_filters(
-        self,
-        model: str,
-        *,
-        read_filters: Optional[Dict[str, Any]] = None,
-        write_filters: Optional[Dict[str, Any]] = None,
+        self, model: str, *, read_filters: Dict[str, Any], write_filters: Dict[str, Any]
     ) -> None:
         if not self.rls:
             raise RuntimeError("RLS is not enabled on this PolyDB instance.")
@@ -687,7 +686,8 @@ class PolyDB:
     # ============================================================
 
     def with_tenant(self, tenant_id: str) -> "PolyDB":
-        TenantContext.set_tenant(tenant_id, self.tenant_registry)
+        if self.tenant_registry:
+            TenantContext.set_tenant(tenant_id, self.tenant_registry)
         return self
 
     def get_tenant(self) -> Optional[TenantConfig]:
