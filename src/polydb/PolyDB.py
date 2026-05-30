@@ -23,7 +23,6 @@ from .types import JsonDict, Lookup
 from .utils import setup_logger
 from .validation import ModelValidator, SchemaValidator
 
-
 ModelRef = Union[Type, str]
 
 
@@ -336,6 +335,7 @@ class PolyDB:
         metadata: Optional[Dict[str, Any]] = None,
         storage_name: str = "default",
         optimize: bool = True,
+        container_name: Optional[str] = None,
     ) -> str:
         storage = self.get_object_storage(storage_name)
         return storage.put(
@@ -345,6 +345,7 @@ class PolyDB:
             optimize=optimize,
             media_type=media_type,
             metadata=metadata or {},
+            container_name=container_name,
         )
 
     def get_blob(
