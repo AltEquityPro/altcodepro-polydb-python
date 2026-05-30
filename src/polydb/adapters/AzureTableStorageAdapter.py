@@ -116,11 +116,17 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         if v is None:
             return None
 
+        # Treat empty containers as absent — let the row omit the property.
+        if isinstance(v, (list, tuple, dict)) and len(v) == 0:
+            return None
+
         if isinstance(v, bytes):
             return _BYTES_PREFIX + base64.b64encode(v).decode("ascii")
 
-        if isinstance(v, (dict, list)):
-            return _JSON_PREFIX + json.dumps(v, default=json_safe)
+        if isinstance(v, (dict, list, tuple)):
+            return _JSON_PREFIX + json.dumps(
+                list(v) if isinstance(v, tuple) else v, default=json_safe
+            )
 
         if isinstance(v, UUID):
             return str(v)

@@ -8,8 +8,6 @@ import hashlib
 from contextlib import contextmanager
 import json
 from datetime import datetime, date
-
-
 from ..errors import DatabaseError, ConnectionError
 from ..retry import retry
 from ..utils import validate_table_name, validate_column_name
@@ -102,34 +100,46 @@ class PostgreSQLAdapter:
 
     def _serialize_value(self, v: Any) -> Any:
         """
-        Make all outgoing values safe for psycopg2.
+        Make outgoing values safe for psycopg2 across mixed column types.
 
         Rules:
-        - dict -> Json()
-        - list -> leave as list (so TEXT[] works)
-        - datetime/date -> pass as native (psycopg2 handles it)
-        - Decimal -> convert to float
-        - everything else -> pass as-is
+        None / empty list / empty dict   -> None  (becomes NULL on any column)
+        list of primitives (str/int/...) -> native list (psycopg2 maps to TEXT[]/INT[])
+        list containing dicts            -> Json(list)  (for JSONB columns)
+        dict                             -> Json(dict)
+        datetime/date                    -> native
+        Decimal                          -> float
+        everything else                  -> as-is
         """
+        # NULL-ify empties so they're valid for TEXT[], JSONB, and plain columns alike.
         from psycopg2.extras import Json
 
         if v is None:
             return None
+        if isinstance(v, (list, tuple)) and len(v) == 0:
+            return None
+        if isinstance(v, dict) and len(v) == 0:
+            return None
 
-        # Dict -> JSON/JSONB
+        # Dict -> JSONB
         if isinstance(v, dict):
             return Json(self._json_safe(v))
 
-        # List:
-        # DO NOT wrap in Json() automatically.
-        # If column is JSONB, Postgres will still accept Json(list).
-        # But for TEXT[] columns we must send Python list.
-        if isinstance(v, list):
+        # List: route by element type.
+        if isinstance(v, (list, tuple)):
+            v = list(v)
+            # If ANY element is a dict, treat as JSON payload (for JSONB columns).
+            if any(isinstance(x, dict) for x in v):
+                return Json(v)
+            # If ALL elements are primitives, send as native list for TEXT[]/INT[].
+            if all(isinstance(x, (str, int, float, bool, type(None))) for x in v):
+                return v
+            # Mixed / nested -> safest is JSONB
             return Json(v)
 
         # Datetime / date
         if isinstance(v, (datetime, date)):
-            return v  # psycopg2 handles natively
+            return v
 
         # Decimal
         if isinstance(v, Decimal):
