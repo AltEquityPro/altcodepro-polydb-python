@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Union
 from enum import Enum
+from .utils import validate_column_name
 
 
 class Operator(Enum):
@@ -130,6 +131,7 @@ class QueryBuilder:
         params = []
 
         for f in self.filters:
+            validate_column_name(f.field)
 
             if f.operator == Operator.EQ:
                 clauses.append(f"{f.field} = %s")
@@ -156,14 +158,15 @@ class QueryBuilder:
                 params.append(f.value)
 
             elif f.operator == Operator.IN:
-
                 if isinstance(f.value, (list, tuple)):
-                    placeholders = ",".join(["%s"] * len(f.value))
-                    clauses.append(f"{f.field} IN ({placeholders})")
-                    params.extend(f.value)
-
+                    if not f.value:
+                        clauses.append("1=0")  # empty IN → match nothing
+                    else:
+                        placeholders = ",".join(["%s"] * len(f.value))
+                        clauses.append(f"{f.field} IN ({placeholders})")
+                        params.extend(f.value)
                 else:
-                    clauses.append(f"{f.field} LIKE %s")
+                    clauses.append(f"{f.field} = %s")  # scalar IN == equality
                     params.append(f.value)
 
             elif f.operator == Operator.NOT_IN:
