@@ -18,6 +18,11 @@ class AuditStorage:
         self.sql = self.factory.get_sql()
         self._ensure_table()
 
+    @staticmethod
+    def _is_unique_violation(exc: Exception) -> bool:
+        s = str(exc).lower()
+        return "23505" in s or "duplicate key" in s or "unique constraint" in s
+
     def _ensure_table(self):
         """Create audit table if not exists"""
         try:
@@ -43,7 +48,8 @@ class AuditStorage:
                 user_agent TEXT,
                 error TEXT,
                 hash VARCHAR(64) NOT NULL,
-                previous_hash VARCHAR(64),
+                previous_hash VARCHAR(64) NOT NULL DEFAULT '',
+                CONSTRAINT uq_audit_chain UNIQUE (tenant_id, previous_hash),
                 created_at TIMESTAMP DEFAULT NOW()
             );
             
@@ -85,53 +91,74 @@ class AuditStorage:
                 return None
 
     def persist(self, record: AuditRecord) -> None:
-        """Persist with lock to ensure chain integrity"""
-        with self._lock:
-            row = {
-                "audit_id": record.audit_id,
-                "timestamp": record.timestamp,
-                "tenant_id": record.tenant_id,
-                "actor_id": record.actor_id,
-                "roles": record.roles or None,  # [] -> NULL
-                "action": record.action,
-                "model": record.model,
-                "entity_id": record.entity_id,
-                "storage_type": record.storage_type,
-                "provider": record.provider,
-                "success": record.success,
-                "before": record.before,
-                "after": record.after,
-                "changed_fields": record.changed_fields or None,  # [] -> NULL
-                "trace_id": record.trace_id,
-                "request_id": record.request_id,
-                "ip_address": record.ip_address,
-                "user_agent": record.user_agent,
-                "error": record.error,
-                "hash": record.hash,
-                "previous_hash": record.previous_hash,
-            }
-            self.sql.insert("polydb_audit_log", row)
+        """Append to the hash chain. Concurrency-safe ACROSS PROCESSES via the
+        UNIQUE(tenant_id, previous_hash) constraint + bounded retry: if two
+        writers race on the same predecessor, the loser re-reads the new tail
+        and re-chains instead of forking. (threading.Lock alone was only
+        process-local — the old "distributed-safe" claim was false.)"""
+        from dataclasses import asdict
+        from .models import compute_audit_hash
+
+        last_err: Optional[Exception] = None
+        for _ in range(8):
+            with self._lock:
+                prev = self.get_last_hash(record.tenant_id) or ""
+                record.previous_hash = prev
+                record.hash = compute_audit_hash(asdict(record))
+                row = {
+                    "audit_id": record.audit_id,
+                    "timestamp": record.timestamp,
+                    "tenant_id": record.tenant_id,
+                    "actor_id": record.actor_id,
+                    "roles": record.roles or None,
+                    "action": record.action,
+                    "model": record.model,
+                    "entity_id": record.entity_id,
+                    "storage_type": record.storage_type,
+                    "provider": record.provider,
+                    "success": record.success,
+                    "before": record.before,
+                    "after": record.after,
+                    "changed_fields": record.changed_fields or None,
+                    "trace_id": record.trace_id,
+                    "request_id": record.request_id,
+                    "ip_address": record.ip_address,
+                    "user_agent": record.user_agent,
+                    "error": record.error,
+                    "hash": record.hash,
+                    "previous_hash": record.previous_hash,
+                }
+                try:
+                    self.sql.insert("polydb_audit_log", row)
+                    return
+                except Exception as e:
+                    if self._is_unique_violation(e):
+                        last_err = e
+                        continue
+                    raise
+        raise last_err or RuntimeError("audit persist failed after retries")
 
     def verify_chain(self, tenant_id: Optional[str] = None) -> bool:
-        """Verify hash chain integrity"""
+        """Verify BOTH chain linkage AND per-record content integrity.
+        The old version only checked previous_hash linkage, so editing
+        before/after/action while leaving `hash` intact passed silently."""
         from ..query import QueryBuilder, Operator
+        from .models import compute_audit_hash
 
         builder = QueryBuilder()
-
         if tenant_id is not None:
             builder.where("tenant_id", Operator.EQ, tenant_id)
-
         builder.order_by("timestamp", descending=False)
 
         records = self.sql.query_linq("polydb_audit_log", builder)
-
         if not records:
             return True
 
-        prev_hash = None
-        for record in records:
-            if record.get("previous_hash") != prev_hash:
+        prev = ""
+        for r in records:
+            if (r.get("previous_hash") or "") != prev:
                 return False
-            prev_hash = record.get("hash")
-
+            if r.get("hash") != compute_audit_hash(r):  # content tamper check
+                return False
+            prev = r.get("hash")
         return True

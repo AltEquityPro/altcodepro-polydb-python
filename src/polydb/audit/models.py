@@ -1,13 +1,50 @@
 # src/polydb/audit/models.py
 
 from dataclasses import dataclass, asdict
-from datetime import datetime
 from typing import Any, Dict, List, Optional
 import uuid
 import hashlib
 import json
-
+from datetime import datetime, timezone
 from ..json_safe import json_safe
+
+
+def _iso(ts: Any) -> str:
+    return ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+
+
+def canonical_audit_payload(src: Dict[str, Any]) -> str:
+    """Deterministic JSON for the hash chain. Identical whether `src` is a
+    freshly-built record (asdict) or a row read back from Postgres, so the
+    create-time hash and the verify-time recomputed hash match.
+    Normalizes [] vs NULL and timestamp formatting; excludes `hash`."""
+    payload = {
+        "audit_id": src.get("audit_id"),
+        "timestamp": _iso(src.get("timestamp")),
+        "tenant_id": src.get("tenant_id"),
+        "actor_id": src.get("actor_id"),
+        "roles": list(src.get("roles") or []),
+        "action": src.get("action"),
+        "model": src.get("model"),
+        "entity_id": src.get("entity_id"),
+        "storage_type": src.get("storage_type"),
+        "provider": src.get("provider"),
+        "success": bool(src.get("success")),
+        "before": src.get("before"),
+        "after": src.get("after"),
+        "changed_fields": list(src.get("changed_fields") or []),
+        "trace_id": src.get("trace_id"),
+        "request_id": src.get("request_id"),
+        "ip_address": src.get("ip_address"),
+        "user_agent": src.get("user_agent"),
+        "error": src.get("error"),
+        "previous_hash": src.get("previous_hash") or "",
+    }
+    return json.dumps(payload, sort_keys=True, default=json_safe)
+
+
+def compute_audit_hash(src: Dict[str, Any]) -> str:
+    return hashlib.sha256(canonical_audit_payload(src).encode()).hexdigest()
 
 
 @dataclass
@@ -55,7 +92,7 @@ class AuditRecord:
         context,
         previous_hash: Optional[str] = None,
     ):
-        now = datetime.utcnow().isoformat()
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         audit_id = str(uuid.uuid4())
 
         record = cls(
@@ -81,8 +118,6 @@ class AuditRecord:
             previous_hash=previous_hash,
         )
 
-        record.hash = hashlib.sha256(
-            json.dumps(asdict(record), sort_keys=True,default=json_safe).encode()
-        ).hexdigest()
+        record.hash = compute_audit_hash(asdict(record))
 
         return record

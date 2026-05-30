@@ -2,6 +2,7 @@
 """
 Security features: encryption, masking, row-level security
 """
+
 from typing import Dict, Any, List, Optional, Callable, Union
 from dataclasses import dataclass
 import hashlib
@@ -50,7 +51,7 @@ class FieldEncryption:
         """Encrypt arbitrary value (serialize if non-str)"""
         if value is None:
             return ""
-        data = json.dumps(value,default=json_safe) if not isinstance(value, str) else value
+        data = json.dumps(value, default=json_safe) if not isinstance(value, str) else value
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -91,9 +92,11 @@ class FieldEncryption:
         except ImportError:
             raise ImportError("cryptography not installed")
         except Exception as e:
-            # On decrypt failure, return masked or original to avoid crashes
-            logger.warning(f"Decryption failed: {e}. Returning original value.")
-            return encrypted_data
+            # Fail loud. Returning ciphertext as if it were plaintext masks
+            # key-rotation errors / corruption and leaks the 'encrypted:' blob
+            # into application data.
+            logger.error("Field decryption failed: %s", e)
+            raise
 
     def encrypt_fields(self, data: Dict[str, Any], fields: List[str]) -> Dict[str, Any]:
         """Encrypt specified fields in data dict"""
