@@ -32,25 +32,64 @@ class PostgreSQLAdapter:
         self._lock = threading.Lock()
         self._initialize_pool()
 
+    def _ping_connection(self, conn) -> bool:
+        """Test if connection is still alive"""
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1")
+            return True
+        except Exception:
+            return False
+
     def _initialize_pool(self):
         try:
             import psycopg2.pool
+            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+
+            # Enhance connection string with better Azure settings
+            dsn = self.connection_string
+            if "postgresql://" in dsn:
+                parsed = urlparse(dsn)
+                query = parse_qs(parsed.query)
+                query.setdefault("connect_timeout", ["30"])
+                query.setdefault("keepalives", ["1"])
+                query.setdefault("keepalives_idle", ["30"])
+                query.setdefault("keepalives_interval", ["10"])
+                query.setdefault("keepalives_count", ["5"])
+
+                new_query = urlencode(query, doseq=True)
+                parsed = parsed._replace(query=new_query)
+                dsn = urlunparse(parsed)
 
             with self._lock:
                 if not self._pool:
                     self._pool = psycopg2.pool.ThreadedConnectionPool(
-                        minconn=int(os.getenv("POSTGRES_MIN_CONNECTIONS", "2")),
-                        maxconn=int(os.getenv("POSTGRES_MAX_CONNECTIONS", "20")),
-                        dsn=self.connection_string,
+                        minconn=int(os.getenv("POSTGRES_MIN_CONNECTIONS", "5")),
+                        maxconn=int(os.getenv("POSTGRES_MAX_CONNECTIONS", "30")),
+                        dsn=dsn,
                     )
-                    self.logger.info("PostgreSQL pool initialized")
+                    self.logger.info("PostgreSQL pool initialized with Azure optimizations")
         except Exception as e:
             raise ConnectionError(f"Failed to initialize PostgreSQL pool: {str(e)}")
 
     def _get_connection(self) -> Any:
         if not self._pool:
             self._initialize_pool()
-        return self._pool.getconn()  # type: ignore
+
+        try:
+            conn = self._pool.getconn()  # type: ignore
+
+            # Critical: Validate connection for Azure transient issues
+            if not self._ping_connection(conn):
+                self.logger.warning("Stale connection detected from pool, closing and retrying")
+                self._pool.putconn(conn, close=True)  # type: ignore
+                conn = self._pool.getconn()  # type: ignore # Get fresh connection
+
+            return conn
+
+        except Exception as e:
+            self.logger.error(f"Failed to acquire connection from pool: {e}")
+            raise ConnectionError(f"Could not obtain database connection: {e}") from e
 
     def _return_connection(self, conn: Any):
         if self._pool and conn:
@@ -59,6 +98,16 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
     # TRANSACTIONS
     # ---------------------------------------------------------------------
+    def reset_pool(self):
+        """Reset the entire pool (call during startup or after major failures)"""
+        with self._lock:
+            if self._pool:
+                try:
+                    self._pool.closeall()
+                except:
+                    pass
+                self._pool = None
+            self._initialize_pool()
 
     def begin_transaction(self) -> Any:
         """Begin a transaction and return the connection handle."""
