@@ -31,6 +31,13 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # ensures model isolation across the same table
 _MODEL_FIELD = "__polydb_model__"
 
+# ─── NEW: HTTP transport tuning ──────────────────────────────────────────────
+# Default Azure SDK has no read timeout. A sync call from an async event loop
+# can park forever. These are overridable via env so ops can tune per env.
+_CONNECT_TIMEOUT = float(os.getenv("AZURE_TABLE_CONNECT_TIMEOUT", "10"))
+_READ_TIMEOUT = float(os.getenv("AZURE_TABLE_READ_TIMEOUT", "30"))
+_RETRY_TOTAL = int(os.getenv("AZURE_TABLE_RETRY_TOTAL", "3"))
+
 logging.getLogger("azure").setLevel(logging.ERROR)
 
 
@@ -43,6 +50,15 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     - Blob overflow for entities > 1MB
     - Model isolation using __polydb_model__
     - Always returns id (derived from RowKey if missing)
+
+    Performance / safety guarantees:
+    - One TableServiceClient per adapter instance.
+    - One TableClient cached per table for the adapter's lifetime.
+    - create_table_if_not_exists runs ONCE per table per adapter lifetime.
+    - Explicit connect/read timeouts on the HTTP transport so a slow or
+      mis-configured endpoint fails fast instead of hanging the caller.
+    - No mutation of instance state inside read/write paths (was the
+      previous `self._table_client = ...` race hazard).
     """
 
     AZURE_TABLE_MAX_SIZE = 60 * 1024  # 1MB
@@ -67,6 +83,16 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self._client: Any = None
         self._blob_service = None
         self._client_lock = threading.Lock()
+
+        # ─── NEW: caches ────────────────────────────────────────────────────
+        # _ensured_tables: table names for which create_table_if_not_exists
+        # has already succeeded on this adapter instance.
+        # _table_clients_cache: TableClient handles by table name.
+        # _cache_lock: protects both caches from concurrent get/put.
+        self._ensured_tables: set[str] = set()
+        self._table_clients_cache: Dict[str, Any] = {}
+        self._cache_lock = threading.Lock()
+
         self._initialize_client()
 
     def _initialize_client(self):
@@ -76,9 +102,22 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             with self._client_lock:
                 if not self._client:
-                    self._client = TableServiceClient.from_connection_string(self.connection_string)
+                    # ─── CHANGED: explicit transport timeouts + retry budget ──
+                    # connection_timeout / read_timeout are honoured by the
+                    # azure-core RequestsTransport. retry_total caps the
+                    # SDK's built-in retry policy so a hard failure surfaces
+                    # in seconds, not minutes.
+                    self._client = TableServiceClient.from_connection_string(
+                        self.connection_string,
+                        connection_timeout=_CONNECT_TIMEOUT,
+                        read_timeout=_READ_TIMEOUT,
+                        retry_total=_RETRY_TOTAL,
+                    )
                     self._blob_service = BlobServiceClient.from_connection_string(
-                        self.connection_string
+                        self.connection_string,
+                        connection_timeout=_CONNECT_TIMEOUT,
+                        read_timeout=_READ_TIMEOUT,
+                        retry_total=_RETRY_TOTAL,
                     )
 
                     try:
@@ -379,22 +418,50 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
     def _get_table_client(self, model: type):
         """
-        Get table client + automatically create the table if it doesn't exist.
-        This is the recommended pattern for Azure Table Storage.
+        Return a TableClient for the model, ensuring the table exists.
+
+        ─── CHANGED ────────────────────────────────────────────────────────
+        Both the table existence check AND the TableClient handle are now
+        cached per adapter instance. The previous version ran
+        create_table_if_not_exists on every read/write/query/delete — a
+        hot-loop seed of 100 records produced ~300 unnecessary network
+        round-trips. Now:
+
+          - First call for a table:  1 HTTP call (create_table_if_not_exists)
+                                     + 1 cheap local TableClient construction.
+          - All subsequent calls:    O(1) dict lookup, no network.
         """
         table_name = self._get_table_name(model)
 
-        try:
-            # This is the key call - creates the table if missing
-            self._client.create_table_if_not_exists(table_name)
-            logger.info(f"✅ Azure Table ensured/created: {table_name}")
-        except Exception as e:
-            # TableAlreadyExists is normal and safe to ignore
-            if "TableAlreadyExists" not in str(e) and "already exists" not in str(e).lower():
-                logger.warning(f"Could not create table {table_name}: {e}")
+        # Fast path: already ensured + client cached.
+        cached = self._table_clients_cache.get(table_name)
+        if cached is not None and table_name in self._ensured_tables:
+            return cached
 
-        # Now return the client
-        return self._client.get_table_client(table_name=table_name)
+        with self._cache_lock:
+            # Re-check inside the lock to avoid duplicate ensures under
+            # concurrent first-touch.
+            cached = self._table_clients_cache.get(table_name)
+            already_ensured = table_name in self._ensured_tables
+
+            if not already_ensured:
+                try:
+                    self._client.create_table_if_not_exists(table_name)
+                    logger.info(f"✅ Azure Table ensured/created: {table_name}")
+                except Exception as e:
+                    # TableAlreadyExists is normal and safe to ignore
+                    msg = str(e)
+                    if "TableAlreadyExists" not in msg and "already exists" not in msg.lower():
+                        logger.warning(f"Could not create table {table_name}: {e}")
+                # Mark as ensured regardless — either it exists now or we
+                # logged the failure; we won't retry on every op.
+                self._ensured_tables.add(table_name)
+
+            if cached is None:
+                cached = self._client.get_table_client(table_name=table_name)
+                self._table_clients_cache[table_name] = cached
+
+            return cached
 
     def _restore_overflow_properties(self, entity_dict: JsonDict) -> JsonDict:
         """Detect and restore any large properties stored in Blob Storage.
@@ -456,7 +523,12 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
-            self._table_client = self._get_table_client(model)
+            # ─── CHANGED: local variable, not self._table_client ────────────
+            # The old pattern `self._table_client = self._get_table_client(...)`
+            # was a race hazard: two concurrent writes on different models
+            # could swap each other's client mid-call. Local variable is
+            # safe and identical in cost since the client is now cached.
+            table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
             # Pack entity (encoded for Azure Table)
@@ -506,8 +578,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 else:
                     reference_entity[k] = v
 
-            self._table_client = self._get_table_client(model)
-            self._table_client.upsert_entity(reference_entity)
+            table_client.upsert_entity(reference_entity)
 
             restored = self._unpack_entity(entity)
             restored["id"] = safe_rk
@@ -525,9 +596,10 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         try:
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
-            self._table_client = self._get_table_client(model)
+            # ─── CHANGED: local variable ────────────────────────────────────
+            table_client = self._get_table_client(model)
 
-            entity = self._table_client.get_entity(safe_pk, safe_rk)
+            entity = table_client.get_entity(safe_pk, safe_rk)
             entity_dict = dict(entity)
 
             # Model isolation check
@@ -553,7 +625,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self, model: type, filters: Dict[str, Any], limit: Optional[int]
     ) -> List[JsonDict]:
         try:
-            self._table_client = self._get_table_client(model)
+            # ─── CHANGED: local variable ────────────────────────────────────
+            table_client = self._get_table_client(model)
 
             # Build query filter (your original logic kept unchanged)
             eff_filters = dict(filters or {})
@@ -590,7 +663,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             query_filter = " and ".join(parts) if parts else None
 
-            entities = self._table_client.query_entities(query_filter=query_filter)
+            entities = table_client.query_entities(query_filter=query_filter)
 
             results: List[JsonDict] = []
             count = 0
@@ -620,13 +693,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _delete_raw(self, model: type, pk: str, rk: str, etag: Optional[str]) -> JsonDict:
         try:
-            self._table_client = self._get_table_client(model)
+            # ─── CHANGED: local variable ────────────────────────────────────
+            table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
 
             # read to check model + overflow
             try:
-                entity = self._table_client.get_entity(safe_pk, safe_rk)
+                entity = table_client.get_entity(safe_pk, safe_rk)
                 entity_dict = dict(entity)
 
                 if entity_dict.get(_MODEL_FIELD) != model.__qualname__:
@@ -639,8 +713,39 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             except Exception:
                 pass
 
-            self._table_client.delete_entity(safe_pk, safe_rk, etag=etag)
+            table_client.delete_entity(safe_pk, safe_rk, etag=etag)
             return {"deleted": True, "PartitionKey": safe_pk, "RowKey": safe_rk, "id": safe_rk}
 
         except Exception as e:
             raise NoSQLError(f"Azure Table delete failed: {str(e)}")
+
+    # -----------------------------
+    # Lifecycle
+    # -----------------------------
+    def close(self) -> None:
+        """Close cached clients. Safe to call multiple times.
+
+        ─── NEW ─────────────────────────────────────────────────────────────
+        Hook this into PolyDB shutdown so HTTP sessions don't leak on
+        application exit. Caches are cleared so a re-init starts clean.
+        """
+        with self._cache_lock:
+            for tc in self._table_clients_cache.values():
+                try:
+                    tc.close()
+                except Exception:
+                    pass
+            self._table_clients_cache.clear()
+            self._ensured_tables.clear()
+
+        with self._client_lock:
+            if self._client is not None:
+                try:
+                    self._client.close()
+                except Exception:
+                    pass
+            if self._blob_service is not None:
+                try:
+                    self._blob_service.close()
+                except Exception:
+                    pass

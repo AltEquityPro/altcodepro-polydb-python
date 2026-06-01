@@ -8,6 +8,9 @@ import hashlib
 from contextlib import contextmanager
 import json
 from datetime import datetime, date
+
+import psycopg2.extensions
+
 from ..errors import DatabaseError, ConnectionError
 from ..retry import retry
 from ..utils import validate_table_name, validate_column_name
@@ -32,13 +35,54 @@ class PostgreSQLAdapter:
         self._lock = threading.Lock()
         self._initialize_pool()
 
+    # ---------------------------------------------------------------------
+    # CONNECTION HYGIENE HELPERS
+    # ---------------------------------------------------------------------
+
+    def _is_idle(self, conn) -> bool:
+        """True iff the connection is not inside a (possibly aborted) transaction."""
+        try:
+            return conn.info.transaction_status == psycopg2.extensions.TRANSACTION_STATUS_IDLE
+        except Exception:
+            return False
+
+    def _drain_transaction(self, conn) -> None:
+        """Force the connection back to IDLE so it's safe to change session
+        settings (e.g. autocommit). Safe to call when already idle."""
+        if self._is_idle(conn):
+            return
+        try:
+            conn.rollback()
+        except Exception:
+            # Last resort: caller will surface a real error on next use.
+            pass
+
     def _ping_connection(self, conn) -> bool:
-        """Test if connection is still alive"""
+        """Test if connection is still alive.
+
+        psycopg2 auto-starts a transaction on the first statement after
+        commit/rollback, so we MUST rollback after the SELECT 1 — otherwise
+        the next caller inherits an active transaction and any attempt to
+        toggle autocommit raises ``set_session cannot be used inside a
+        transaction``.
+        """
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
+            # Clean up the auto-started transaction so the connection
+            # leaves this method in IDLE state.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return True
         except Exception:
+            # Best-effort cleanup on a failed ping. The connection is
+            # almost certainly broken; the caller will close it.
+            try:
+                conn.rollback()
+            except Exception:
+                pass
             return False
 
     def _initialize_pool(self):
@@ -79,11 +123,15 @@ class PostgreSQLAdapter:
         try:
             conn = self._pool.getconn()  # type: ignore
 
-            # Critical: Validate connection for Azure transient issues
+            # Critical: Validate connection for Azure transient issues.
+            # _ping_connection rolls back its own SELECT 1 so the connection
+            # is returned to callers in IDLE state.
             if not self._ping_connection(conn):
                 self.logger.warning("Stale connection detected from pool, closing and retrying")
                 self._pool.putconn(conn, close=True)  # type: ignore
                 conn = self._pool.getconn()  # type: ignore # Get fresh connection
+                # New connection might still have been used before — make sure it's idle.
+                self._drain_transaction(conn)
 
             return conn
 
@@ -92,7 +140,13 @@ class PostgreSQLAdapter:
             raise ConnectionError(f"Could not obtain database connection: {e}") from e
 
     def _return_connection(self, conn: Any):
+        """Return a connection to the pool, defensively draining any
+        leftover transaction state. Belt-and-suspenders: every operation
+        in this adapter already commits/rolls-back before returning, but
+        if any path ever forgets, the pool still gets a clean connection.
+        """
         if self._pool and conn:
+            self._drain_transaction(conn)
             self._pool.putconn(conn)
 
     # ---------------------------------------------------------------------
@@ -110,8 +164,16 @@ class PostgreSQLAdapter:
             self._initialize_pool()
 
     def begin_transaction(self) -> Any:
-        """Begin a transaction and return the connection handle."""
+        """Begin a transaction and return the connection handle.
+
+        Defensively drains any leftover transaction state on the pooled
+        connection before toggling autocommit. Without this, a connection
+        that's still in TRANSACTION_STATUS_INTRANS (from a previous user
+        or from the pool's connection check) causes psycopg2 to raise
+        ``set_session cannot be used inside a transaction``.
+        """
         conn = self._get_connection()
+        self._drain_transaction(conn)
         conn.autocommit = False
         return conn
 
@@ -318,8 +380,16 @@ class PostgreSQLAdapter:
             results = [self._deserialize_row(dict(zip(columns, row))) for row in cursor.fetchall()]
             cursor.close()
 
+            if own_conn:
+                conn.commit()
+
             return results
         except Exception as e:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             raise DatabaseError(f"Select failed: {str(e)}")
         finally:
             if own_conn and conn:
