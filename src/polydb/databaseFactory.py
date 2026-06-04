@@ -34,7 +34,7 @@ from .audit.manager import AuditManager
 from .audit.context import AuditContext
 from .query import Operator, QueryBuilder
 from .cloudDatabaseFactory import CloudDatabaseFactory
-
+import re as _re
 logger = logging.getLogger(__name__)
 
 _DEFAULT_RETRY = retry(
@@ -43,7 +43,32 @@ _DEFAULT_RETRY = retry(
     reraise=True,
 )
 
+_UNIQUE_VIOLATION_MARKERS = (
+    "23505",                                 # Postgres SQLSTATE
+    "duplicate key value violates",          # Postgres message
+    "unique constraint",                      # Postgres, generic
+    "UniqueViolation",                        # psycopg / SQLAlchemy class name
+    "Duplicate entry",                        # MySQL
+    "UNIQUE constraint failed",               # SQLite
+)
+_UNIQUE_KEY_RE = _re.compile(r"Key \(([^)]+)\)=")
 
+
+def _is_unique_violation(exc: BaseException) -> bool:
+    s = str(exc)
+    return any(m in s for m in _UNIQUE_VIOLATION_MARKERS)
+
+
+def _parse_unique_violation_columns(exc: BaseException) -> list[str]:
+    """
+    Pull the conflicting column names out of a Postgres unique-violation error.
+    Postgres formats them as:  Key (col1, col2)=(val1, val2) already exists.
+    Returns [] if the message doesn't carry that detail.
+    """
+    m = _UNIQUE_KEY_RE.search(str(exc))
+    if not m:
+        return []
+    return [c.strip() for c in m.group(1).split(",") if c.strip()]
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENGINE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -359,9 +384,7 @@ class DatabaseFactory:
             logger.error("Audit recording failed: %s", exc)
 
     def _run(self, fn: Callable[[], Any]) -> Any:
-        if not self._enable_retries:
-            return fn()
-        return _DEFAULT_RETRY(fn)()
+        return fn()
 
     def _is_sql(self, meta: ModelMeta, override: Optional[EngineOverride] = None) -> bool:
         if override and override.force_sql:
@@ -398,14 +421,32 @@ class DatabaseFactory:
         def _op() -> JsonDict:
             nonlocal after_plain, success, entity_id
             if self._is_sql(meta, engine_override):
-                result = adapters.sql.insert(meta.table, data)
+                try:
+                    result = adapters.sql.insert(meta.table, data)
+                except Exception as exc:
+                    if not _is_unique_violation(exc):
+                        raise
+                    # Half-ran scenario / re-activation / replay. The record already
+                    # exists with these unique-key columns. Preserve idempotent
+                    # "create or update" semantics by routing to UPDATE keyed on the
+                    # exact columns that conflicted (parsed from the Postgres error).
+                    conflict_cols = _parse_unique_violation_columns(exc)
+                    if not conflict_cols or not all(c in data for c in conflict_cols):
+                        # Can't determine the conflict — re-raise so the caller sees it.
+                        raise
+                    where = {c: data[c] for c in conflict_cols}
+                    logger.warning(
+                        "insert %s hit unique violation on %s — falling through to update",
+                        meta.table, conflict_cols,
+                    )
+                    # Drop the conflict columns from the UPDATE SET clause — they're
+                    # already the matching key.
+                    update_data = {k: v for k, v in data.items() if k not in conflict_cols}
+                    result = adapters.sql.update(meta.table, where, update_data)
             else:
                 result = adapters.nosql.put(
-                    (
-                        model
-                        if isinstance(model, type)
-                        else type(name, (), {"__polydb__": meta.__dict__})
-                    ),
+                    model if isinstance(model, type)
+                        else type(name, (), {"__polydb__": meta.__dict__}),
                     data,
                 )
             entity_id = result.get("id")
@@ -416,7 +457,6 @@ class DatabaseFactory:
             if self._enable_cache and self._cache:
                 self._cache.invalidate(name)
             return after_plain
-
         try:
             monitor = (
                 PerformanceMonitor(self.metrics, "create", name, None) if self.metrics else None

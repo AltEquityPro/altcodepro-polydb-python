@@ -3,10 +3,33 @@
 Retry logic with exponential backoff and metrics hooks
 """
 
+import functools
 import time
 import logging
 from functools import wraps
 from typing import Callable, Optional, Tuple, Type
+logger = logging.getLogger(__name__)
+
+_NON_RETRYABLE_MARKERS = (
+    "23505",                          # Postgres unique_violation
+    "23503",                          # Postgres foreign_key_violation
+    "23502",                          # Postgres not_null_violation
+    "23514",                          # Postgres check_violation
+    "duplicate key value violates",
+    "unique constraint",
+    "UniqueViolation",
+    "Duplicate entry",
+    "UNIQUE constraint failed",
+    "PropertyValueTooLarge",
+    "ResourceNotFound",
+    "InvalidArgument",
+    "AuthenticationFailed",
+)
+
+
+def _is_non_retryable(exc: BaseException) -> bool:
+    s = str(exc)
+    return any(m in s for m in _NON_RETRYABLE_MARKERS)
 
 
 # Metrics hooks for enterprise monitoring
