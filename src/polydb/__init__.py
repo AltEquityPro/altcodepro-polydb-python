@@ -9,7 +9,6 @@ __version__ = "2.2.3"
 from .cloudDatabaseFactory import CloudDatabaseFactory
 from .databaseFactory import DatabaseFactory
 from .models import CloudProvider, PartitionConfig
-from .decorators import polydb_model
 from .query import QueryBuilder, Operator
 from .audit.context import AuditContext
 from .cache import RedisCacheEngine as CacheEngine
@@ -36,7 +35,6 @@ __all__ = [
     # Models & Config
     "CloudProvider",
     "PartitionConfig",
-    "polydb_model",
     # Query
     "QueryBuilder",
     "Operator",
