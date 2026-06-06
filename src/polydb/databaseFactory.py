@@ -35,6 +35,7 @@ from .audit.context import AuditContext
 from .query import Operator, QueryBuilder
 from .cloudDatabaseFactory import CloudDatabaseFactory
 import re as _re
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_RETRY = retry(
@@ -44,12 +45,12 @@ _DEFAULT_RETRY = retry(
 )
 
 _UNIQUE_VIOLATION_MARKERS = (
-    "23505",                                 # Postgres SQLSTATE
-    "duplicate key value violates",          # Postgres message
-    "unique constraint",                      # Postgres, generic
-    "UniqueViolation",                        # psycopg / SQLAlchemy class name
-    "Duplicate entry",                        # MySQL
-    "UNIQUE constraint failed",               # SQLite
+    "23505",  # Postgres SQLSTATE
+    "duplicate key value violates",  # Postgres message
+    "unique constraint",  # Postgres, generic
+    "UniqueViolation",  # psycopg / SQLAlchemy class name
+    "Duplicate entry",  # MySQL
+    "UNIQUE constraint failed",  # SQLite
 )
 _UNIQUE_KEY_RE = _re.compile(r"Key \(([^)]+)\)=")
 
@@ -69,6 +70,8 @@ def _parse_unique_violation_columns(exc: BaseException) -> list[str]:
     if not m:
         return []
     return [c.strip() for c in m.group(1).split(",") if c.strip()]
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # ENGINE CONFIG
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -347,42 +350,6 @@ class DatabaseFactory:
         result.setdefault("deleted_at", None)
         return result
 
-    def _audit_safe(
-        self,
-        *,
-        action: str,
-        model: Union[type, str],
-        entity_id: Optional[Any],
-        meta: ModelMeta,
-        success: bool,
-        before: Optional[JsonDict],
-        after: Optional[JsonDict],
-        error: Optional[str],
-        engine_name: Optional[str] = None,
-    ) -> None:
-        if not self._audit:
-            return
-        try:
-            changed = None
-            if before and after:
-                changed = [
-                    k for k in set(before) | set(after) if before.get(k) != after.get(k)
-                ] or None
-            self._audit.record(
-                action=action,
-                model=_model_name(model),
-                entity_id=str(entity_id) if entity_id else None,
-                storage_type=meta.storage,
-                provider=engine_name or self._provider_name,
-                success=success,
-                before=before,
-                after=after,
-                changed_fields=changed,
-                error=error,
-            )
-        except Exception as exc:
-            logger.error("Audit recording failed: %s", exc)
-
     def _run(self, fn: Callable[[], Any]) -> Any:
         return fn()
 
@@ -437,7 +404,8 @@ class DatabaseFactory:
                     where = {c: data[c] for c in conflict_cols}
                     logger.warning(
                         "insert %s hit unique violation on %s — falling through to update",
-                        meta.table, conflict_cols,
+                        meta.table,
+                        conflict_cols,
                     )
                     # Drop the conflict columns from the UPDATE SET clause — they're
                     # already the matching key.
@@ -445,8 +413,11 @@ class DatabaseFactory:
                     result = adapters.sql.update(meta.table, where, update_data)
             else:
                 result = adapters.nosql.put(
-                    model if isinstance(model, type)
-                        else type(name, (), {"__polydb__": meta.__dict__}),
+                    (
+                        model
+                        if isinstance(model, type)
+                        else type(name, (), {"__polydb__": meta.__dict__})
+                    ),
                     data,
                 )
             entity_id = result.get("id")
@@ -457,6 +428,7 @@ class DatabaseFactory:
             if self._enable_cache and self._cache:
                 self._cache.invalidate(name)
             return after_plain
+
         try:
             monitor = (
                 PerformanceMonitor(self.metrics, "create", name, None) if self.metrics else None
@@ -467,21 +439,8 @@ class DatabaseFactory:
                     m.rows_affected = 1
                     return result
             return self._run(_op)
-        except Exception as exc:
-            error = str(exc)
+        except Exception:
             raise
-        finally:
-            self._audit_safe(
-                action="create",
-                model=model,
-                entity_id=entity_id,
-                meta=meta,
-                success=success,
-                before=None,
-                after=after_plain,
-                error=error,
-                engine_name=adapters.engine_name,
-            )
 
     # ──────────────────────────────────────────────────────────────────────
     # READ
@@ -645,21 +604,8 @@ class DatabaseFactory:
                     m.rows_affected = 1
                     return result
             return self._run(_op)
-        except Exception as exc:
-            error = str(exc)
+        except Exception:
             raise
-        finally:
-            self._audit_safe(
-                action="update",
-                model=model,
-                entity_id=entity_id if not isinstance(entity_id, dict) else None,
-                meta=meta,
-                success=success,
-                before=before,
-                after=after_plain,
-                error=error,
-                engine_name=adapters.engine_name,
-            )
 
     # ──────────────────────────────────────────────────────────────────────
     # UPSERT
@@ -715,21 +661,8 @@ class DatabaseFactory:
                     m.rows_affected = 1
                     return result
             return self._run(_op)
-        except Exception as exc:
-            error = str(exc)
+        except Exception:
             raise
-        finally:
-            self._audit_safe(
-                action="upsert",
-                model=model,
-                entity_id=None,
-                meta=meta,
-                success=success,
-                before=None,
-                after=after_plain,
-                error=error,
-                engine_name=adapters.engine_name,
-            )
 
     # ──────────────────────────────────────────────────────────────────────
     # DELETE
@@ -795,21 +728,8 @@ class DatabaseFactory:
                     m.rows_affected = 1
                     return result
             return self._run(_op)
-        except Exception as exc:
-            error = str(exc)
+        except Exception:
             raise
-        finally:
-            self._audit_safe(
-                action="delete",
-                model=model,
-                entity_id=entity_id if not isinstance(entity_id, dict) else None,
-                meta=meta,
-                success=success,
-                before=before,
-                after=None,
-                error=error,
-                engine_name=adapters.engine_name,
-            )
 
     # ──────────────────────────────────────────────────────────────────────
     # QUERY (LINQ-style)
