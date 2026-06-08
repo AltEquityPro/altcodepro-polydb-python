@@ -56,31 +56,19 @@ class PostgreSQLAdapter:
         try:
             conn.rollback()
         except Exception:
-            # Last resort: caller will surface a real error on next use.
             pass
 
     def _ping_connection(self, conn) -> bool:
-        """Test if connection is still alive.
-
-        psycopg2 auto-starts a transaction on the first statement after
-        commit/rollback, so we MUST rollback after the SELECT 1 — otherwise
-        the next caller inherits an active transaction and any attempt to
-        toggle autocommit raises ``set_session cannot be used inside a
-        transaction``.
-        """
+        """Test if connection is still alive."""
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
-            # Clean up the auto-started transaction so the connection
-            # leaves this method in IDLE state.
             try:
                 conn.rollback()
             except Exception:
                 pass
             return True
         except Exception:
-            # Best-effort cleanup on a failed ping. The connection is
-            # almost certainly broken; the caller will close it.
             try:
                 conn.rollback()
             except Exception:
@@ -92,7 +80,6 @@ class PostgreSQLAdapter:
             import psycopg2.pool
             from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
 
-            # Enhance connection string with better Azure settings
             dsn = self.connection_string
             if "postgresql://" in dsn:
                 parsed = urlparse(dsn)
@@ -107,16 +94,39 @@ class PostgreSQLAdapter:
                 parsed = parsed._replace(query=new_query)
                 dsn = urlunparse(parsed)
 
+            # H14: default raised from 30 → 100 to handle production concurrency
+            _maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
             with self._lock:
                 if not self._pool:
                     self._pool = psycopg2.pool.ThreadedConnectionPool(
                         minconn=int(os.getenv("POSTGRES_MIN_CONNECTIONS", "5")),
-                        maxconn=int(os.getenv("POSTGRES_MAX_CONNECTIONS", "30")),
+                        maxconn=_maxconn,
                         dsn=dsn,
                     )
-                    self.logger.info("PostgreSQL pool initialized with Azure optimizations")
+                    self.logger.info(
+                        "PostgreSQL pool initialized: min=%s max=%s",
+                        os.getenv("POSTGRES_MIN_CONNECTIONS", "5"),
+                        _maxconn,
+                    )
         except Exception as e:
             raise ConnectionError(f"Failed to initialize PostgreSQL pool: {str(e)}")
+
+    def _log_pool_utilization(self) -> None:
+        """Warn when pool is >80% exhausted."""
+        if not self._pool:
+            return
+        try:
+            maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
+            # psycopg2 ThreadedConnectionPool stores borrowed conns in ._used
+            used_count = len(getattr(self._pool, "_used", {}))
+            pct = (used_count / maxconn * 100) if maxconn else 0
+            if pct > 80:
+                self.logger.warning(
+                    "PostgreSQL pool utilization: %d/%d connections in use (%.0f%%)",
+                    used_count, maxconn, pct,
+                )
+        except Exception:
+            pass
 
     def _get_connection(self) -> Any:
         if not self._pool:
@@ -125,16 +135,13 @@ class PostgreSQLAdapter:
         try:
             conn = self._pool.getconn()  # type: ignore
 
-            # Critical: Validate connection for Azure transient issues.
-            # _ping_connection rolls back its own SELECT 1 so the connection
-            # is returned to callers in IDLE state.
             if not self._ping_connection(conn):
                 self.logger.warning("Stale connection detected from pool, closing and retrying")
                 self._pool.putconn(conn, close=True)  # type: ignore
-                conn = self._pool.getconn()  # type: ignore # Get fresh connection
-                # New connection might still have been used before — make sure it's idle.
+                conn = self._pool.getconn()  # type: ignore
                 self._drain_transaction(conn)
 
+            self._log_pool_utilization()
             return conn
 
         except Exception as e:
@@ -142,11 +149,6 @@ class PostgreSQLAdapter:
             raise ConnectionError(f"Could not obtain database connection: {e}") from e
 
     def _return_connection(self, conn: Any):
-        """Return a connection to the pool, defensively draining any
-        leftover transaction state. Belt-and-suspenders: every operation
-        in this adapter already commits/rolls-back before returning, but
-        if any path ever forgets, the pool still gets a clean connection.
-        """
         if self._pool and conn:
             self._drain_transaction(conn)
             self._pool.putconn(conn)
@@ -164,12 +166,6 @@ class PostgreSQLAdapter:
         operation: str = "execute",
         table: str = "",
     ) -> float:
-        """
-        Execute ``cursor.execute(sql, params)`` and return elapsed milliseconds.
-
-        Logs at DEBUG level with operation/table/duration_ms, and emits a
-        WARNING if the query exceeds ``POLYDB_SLOW_QUERY_MS`` (default 1000 ms).
-        """
         t0 = time.perf_counter()
         cursor.execute(sql, params)
         duration_ms = (time.perf_counter() - t0) * 1000.0
@@ -186,10 +182,7 @@ class PostgreSQLAdapter:
         if duration_ms > self._slow_query_ms:
             self.logger.warning(
                 "Slow query detected: operation=%s table=%s duration_ms=%.1f threshold=%.1f",
-                operation,
-                table,
-                duration_ms,
-                self._slow_query_ms,
+                operation, table, duration_ms, self._slow_query_ms,
             )
 
         return duration_ms
@@ -198,7 +191,6 @@ class PostgreSQLAdapter:
     # TRANSACTIONS
     # ---------------------------------------------------------------------
     def reset_pool(self):
-        """Reset the entire pool (call during startup or after major failures)"""
         with self._lock:
             if self._pool:
                 try:
@@ -209,27 +201,17 @@ class PostgreSQLAdapter:
             self._initialize_pool()
 
     def begin_transaction(self) -> Any:
-        """Begin a transaction and return the connection handle.
-
-        Defensively drains any leftover transaction state on the pooled
-        connection before toggling autocommit. Without this, a connection
-        that's still in TRANSACTION_STATUS_INTRANS (from a previous user
-        or from the pool's connection check) causes psycopg2 to raise
-        ``set_session cannot be used inside a transaction``.
-        """
         conn = self._get_connection()
         self._drain_transaction(conn)
         conn.autocommit = False
         return conn
 
     def commit(self, tx: Any):
-        """Commit the transaction using the provided connection."""
         if tx:
             tx.commit()
             self._return_connection(tx)
 
     def rollback(self, tx: Any):
-        """Rollback the transaction using the provided connection."""
         if tx:
             tx.rollback()
             self._return_connection(tx)
@@ -238,11 +220,6 @@ class PostgreSQLAdapter:
     # JSON HELPERS
     # ---------------------------------------------------------------------
     def _json_safe(self, obj: Any):
-        """
-        Ensure JSON serialization never fails. Used only for Json() wrapping.
-        Recurses into dicts, lists, AND tuples so nested datetime/Decimal
-        values are made safe at any depth.
-        """
         if isinstance(obj, datetime):
             return obj.isoformat()
         if isinstance(obj, Decimal):
@@ -256,21 +233,6 @@ class PostgreSQLAdapter:
         return obj
 
     def _serialize_value(self, v: Any) -> Any:
-        """
-        Serialize a value being WRITTEN to a column (insert / update SET /
-        upsert data values).
-
-        This platform provisions every ARRAY and OBJECT field as a JSONB
-        column (SchemaProvisioner._FIELD_TO_SQL_TYPE never emits a native
-        text[]/int[] column), so dicts AND lists/tuples are ALWAYS
-        JSON-encoded via psycopg2's Json adapter.
-
-        Json() handles empty {} and [] correctly ('{}'::jsonb / '[]'::jsonb),
-        handles nesting, and never produces a quoted string — which is what
-        broke the earlier native-list, json.dumps, and NULL-ify-empties
-        attempts. Empties are NOT turned into NULL: an empty JSONB array/
-        object is a valid, meaningful value.
-        """
         if v is None:
             return None
         if isinstance(v, (dict, list, tuple)):
@@ -282,15 +244,6 @@ class PostgreSQLAdapter:
         return v
 
     def _serialize_param(self, v: Any) -> Any:
-        """
-        Serialize a value used as a QUERY PARAMETER (WHERE values, IN / ANY
-        lists, LIMIT/OFFSET, raw execute() params).
-
-        Unlike _serialize_value, primitive lists/tuples are kept NATIVE so
-        that ``IN %s`` / ``= ANY(%s)`` parameters expand correctly. A dict
-        (or a list that contains dicts) is JSON-encoded so it can be compared
-        against a JSONB column.
-        """
         if v is None:
             return None
         if isinstance(v, dict):
@@ -299,7 +252,7 @@ class PostgreSQLAdapter:
             seq = list(v)
             if any(isinstance(x, dict) for x in seq):
                 return Json(self._json_safe(seq))
-            return seq  # native -> psycopg2 expands for IN / ANY
+            return seq
         if isinstance(v, (datetime, date)):
             return v
         if isinstance(v, Decimal):
@@ -310,14 +263,9 @@ class PostgreSQLAdapter:
         return [self._serialize_param(p) for p in params]
 
     def _deserialize_row(self, row: JsonDict) -> JsonDict:
-        """
-        Postgres JSON/JSONB often comes back as dict/list already depending on
-        driver config. If it comes as a string, try json.loads safely.
-        """
         for k, v in list(row.items()):
             if isinstance(v, str):
                 s = v.strip()
-                # quick cheap check to avoid parsing normal strings
                 if (s.startswith("{") and s.endswith("}")) or (
                     s.startswith("[") and s.endswith("]")
                 ):
@@ -345,24 +293,18 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
             columns = ", ".join(data.keys())
             placeholders = ", ".join(["%s"] * len(data))
             query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
-
             values = [self._serialize_value(v) for v in data.values()]
             self._timed_execute(cursor, query, values, operation="insert", table=table)
-
             result_row = cursor.fetchone()
             columns_list = [desc[0] for desc in cursor.description]
             result = dict(zip(columns_list, result_row))
-
             if own_conn:
                 conn.commit()
-
             cursor.close()
             return self._deserialize_row(result)
-
         except Exception as e:
             if own_conn:
                 conn.rollback()
@@ -393,7 +335,6 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
             sql = f"SELECT * FROM {table}"
             params: List[Any] = []
 
@@ -401,8 +342,6 @@ class PostgreSQLAdapter:
                 where_parts: List[str] = []
                 for k, v in query.items():
                     validate_column_name(k)
-
-                    # IMPORTANT: None must be "IS NULL" not "= %s"
                     if v is None:
                         where_parts.append(f"{k} IS NULL")
                     elif isinstance(v, (list, tuple)):
@@ -412,7 +351,6 @@ class PostgreSQLAdapter:
                     else:
                         where_parts.append(f"{k} = %s")
                         params.append(v)
-
                 if where_parts:
                     sql += " WHERE " + " AND ".join(where_parts)
 
@@ -429,10 +367,8 @@ class PostgreSQLAdapter:
             columns = [desc[0] for desc in cursor.description]
             results = [self._deserialize_row(dict(zip(columns, row))) for row in cursor.fetchall()]
             cursor.close()
-
             if own_conn:
                 conn.commit()
-
             return results
         except Exception as e:
             if own_conn:
@@ -460,11 +396,9 @@ class PostgreSQLAdapter:
     ) -> Tuple[List[JsonDict], Optional[str]]:
         offset = int(continuation_token) if continuation_token else 0
         results = self.select(table, query, limit=page_size + 1, offset=offset, tx=tx)
-
         has_more = len(results) > page_size
         if has_more:
             results = results[:page_size]
-
         next_token = str(offset + page_size) if has_more else None
         return results, next_token
 
@@ -492,9 +426,7 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
             set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
-            # SET values are written into columns -> write serializer (JSONB).
             params: List[Any] = [self._serialize_value(v) for v in data.values()]
 
             if isinstance(entity_id, dict):
@@ -505,7 +437,6 @@ class PostgreSQLAdapter:
                         where_parts.append(f"{k} IS NULL")
                     else:
                         where_parts.append(f"{k} = %s")
-                        # WHERE values are query params -> param serializer.
                         params.append(self._serialize_param(v))
                 where_clause = " AND ".join(where_parts)
             else:
@@ -514,17 +445,13 @@ class PostgreSQLAdapter:
 
             query = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
             self._timed_execute(cursor, query, params, operation="update", table=table)
-
             result_row = cursor.fetchone()
             if not result_row:
                 raise DatabaseError("No rows updated")
-
             columns = [desc[0] for desc in cursor.description]
             result = dict(zip(columns, result_row))
-
             if own_conn:
                 conn.commit()
-
             cursor.close()
             return self._deserialize_row(result)
         except Exception as e:
@@ -553,10 +480,8 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
             columns = ", ".join(data.keys())
             placeholders = ", ".join(["%s"] * len(data))
-
             conflict_columns = ["id"] if "id" in data else list(data.keys())[:1]
             update_fields = [k for k in data.keys() if k not in conflict_columns]
 
@@ -573,14 +498,10 @@ class PostgreSQLAdapter:
                 {on_conflict}
                 RETURNING *
             """
-
             values = [self._serialize_value(v) for v in data.values()]
             self._timed_execute(cursor, query, values, operation="upsert", table=table)
-
             result_row = cursor.fetchone()
             if not result_row:
-                # DO NOTHING case: fetch existing row (best effort)
-                # If conflict is on id, we can read it back.
                 if "id" in conflict_columns and "id" in data:
                     cursor.execute(f"SELECT * FROM {table} WHERE id = %s", [data["id"]])
                     result_row = cursor.fetchone()
@@ -591,10 +512,8 @@ class PostgreSQLAdapter:
 
             columns_list = [desc[0] for desc in cursor.description]
             result = dict(zip(columns_list, result_row))
-
             if own_conn:
                 conn.commit()
-
             cursor.close()
             return self._deserialize_row(result)
         except Exception as e:
@@ -622,7 +541,6 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
             params: List[Any] = []
             if isinstance(entity_id, dict):
                 where_parts: List[str] = []
@@ -632,7 +550,6 @@ class PostgreSQLAdapter:
                         where_parts.append(f"{k} IS NULL")
                     else:
                         where_parts.append(f"{k} = %s")
-                        # WHERE values are query params -> param serializer.
                         params.append(self._serialize_param(v))
                 where_clause = " AND ".join(where_parts)
             else:
@@ -642,16 +559,12 @@ class PostgreSQLAdapter:
             query = f"DELETE FROM {table} WHERE {where_clause} RETURNING *"
             self._timed_execute(cursor, query, params, operation="delete", table=table)
             result_row = cursor.fetchone()
-
             if not result_row:
                 raise DatabaseError("No rows deleted")
-
             columns = [desc[0] for desc in cursor.description]
             result = dict(zip(columns, result_row))
-
             if own_conn:
                 conn.commit()
-
             cursor.close()
             return self._deserialize_row(result)
         except Exception as e:
@@ -670,9 +583,7 @@ class PostgreSQLAdapter:
     def query_linq(
         self, table: str, builder: QueryBuilder, tx: Optional[Any] = None
     ) -> Union[List[JsonDict], int]:
-
         table = validate_table_name(table)
-
         conn = tx
         own_conn = False
         if not conn:
@@ -681,88 +592,45 @@ class PostgreSQLAdapter:
 
         try:
             cursor = conn.cursor()
-
-            # ------------------------------------------------
-            # SELECT clause
-            # ------------------------------------------------
-
             if builder.count_only:
                 sql = f"SELECT COUNT(*) FROM {table}"
-
             elif builder.selected_fields:
                 for f in builder.selected_fields:
                     validate_column_name(f)
-
                 fields = ", ".join(builder.selected_fields)
-
                 if builder.distinct_flag:
                     sql = f"SELECT DISTINCT {fields} FROM {table}"
                 else:
                     sql = f"SELECT {fields} FROM {table}"
-
             else:
                 sql = f"SELECT * FROM {table}"
 
             params: List[Any] = []
-
-            # ------------------------------------------------
-            # WHERE
-            # ------------------------------------------------
-
             where_clause, where_params = builder.to_sql_where()
-
             if where_clause:
                 sql += f" WHERE {where_clause}"
                 params.extend(where_params)
 
-            # ------------------------------------------------
-            # GROUP BY
-            # ------------------------------------------------
-
             if builder.group_by_fields:
-
                 for f in builder.group_by_fields:
                     validate_column_name(f)
-
                 sql += f" GROUP BY {', '.join(builder.group_by_fields)}"
 
-            # ------------------------------------------------
-            # ORDER BY
-            # ------------------------------------------------
-
             if builder.order_by_fields:
-
                 order_parts = []
-
                 for field, desc in builder.order_by_fields:
-
                     validate_column_name(field)
-
                     direction = "DESC" if desc else "ASC"
-
                     order_parts.append(f"{field} {direction}")
-
                 sql += f" ORDER BY {', '.join(order_parts)}"
-
-            # ------------------------------------------------
-            # LIMIT
-            # ------------------------------------------------
 
             if builder.take_count is not None:
                 sql += " LIMIT %s"
                 params.append(builder.take_count)
 
-            # ------------------------------------------------
-            # OFFSET
-            # ------------------------------------------------
-
             if builder.skip_count:
                 sql += " OFFSET %s"
                 params.append(builder.skip_count)
-
-            # ------------------------------------------------
-            # EXECUTE
-            # ------------------------------------------------
 
             self._timed_execute(
                 cursor, sql, self._serialize_params(params), operation="query_linq", table=table
@@ -770,30 +638,21 @@ class PostgreSQLAdapter:
 
             if builder.count_only:
                 result = cursor.fetchone()[0]
-
             else:
                 columns = [desc[0] for desc in cursor.description]
-
                 result = [
                     self._deserialize_row(dict(zip(columns, row))) for row in cursor.fetchall()
                 ]
 
             cursor.close()
-
             if own_conn:
                 conn.commit()
-
             return result
-
         except Exception as e:
-
             if own_conn:
                 conn.rollback()
-
             raise DatabaseError(f"LINQ query failed: {str(e)}")
-
         finally:
-
             if own_conn and conn:
                 self._return_connection(conn)
 
@@ -821,7 +680,6 @@ class PostgreSQLAdapter:
         try:
             cursor = conn.cursor()
             self.logger.debug("Executing raw SQL: %s", sql)
-
             exec_params = self._serialize_params(params or [])
             self._timed_execute(cursor, sql, exec_params, operation="execute", table="")
 
@@ -846,7 +704,6 @@ class PostgreSQLAdapter:
             if own_conn:
                 conn.commit()
             return None
-
         except Exception as e:
             if own_conn:
                 try:
@@ -854,7 +711,6 @@ class PostgreSQLAdapter:
                 except Exception:
                     pass
             raise DatabaseError(f"Execute failed: {str(e)}")
-
         finally:
             if cursor:
                 try:
@@ -865,7 +721,7 @@ class PostgreSQLAdapter:
                 self._return_connection(conn)
 
     # ---------------------------------------------------------------------
-    # ATOMIC DECREMENT
+    # ATOMIC OPERATIONS
     # ---------------------------------------------------------------------
 
     def atomic_decrement_if_sufficient(
@@ -878,13 +734,6 @@ class PostgreSQLAdapter:
         *,
         tx: Optional[Any] = None,
     ) -> JsonDict:
-        """Atomically decrement *balance_field* by *amount* where *where_field* = *where_value*,
-        but only if the current balance is >= *amount*.
-
-        Returns the updated row dict on success.
-        Raises InsufficientBalanceError if no row was updated (balance too low or row not found).
-        Raises DatabaseError on other failures.
-        """
         table = validate_table_name(table)
         validate_column_name(balance_field)
         validate_column_name(where_field)
@@ -915,13 +764,10 @@ class PostgreSQLAdapter:
 
             columns = [desc[0] for desc in cursor.description]
             result = dict(zip(columns, result_row))
-
             if own_conn:
                 conn.commit()
-
             cursor.close()
             return self._deserialize_row(result)
-
         except InsufficientBalanceError:
             raise
         except Exception as e:
@@ -946,10 +792,6 @@ class PostgreSQLAdapter:
         *,
         tx: Optional[Any] = None,
     ) -> Optional[JsonDict]:
-        """Compare-and-swap: UPDATE … SET field=value WHERE id=id_value AND field=expected RETURNING *.
-        Returns the updated row dict if the swap succeeded, None if the field
-        no longer held the expected value (concurrent write won).
-        """
         table = validate_table_name(table)
         validate_column_name(field)
         validate_column_name(id_field)
@@ -994,7 +836,6 @@ class PostgreSQLAdapter:
         *,
         tx: Optional[Any] = None,
     ) -> JsonDict:
-        """UPDATE … SET field = GREATEST(field, value) WHERE id=id_value RETURNING *."""
         table = validate_table_name(table)
         validate_column_name(field)
         validate_column_name(id_field)
@@ -1040,7 +881,6 @@ class PostgreSQLAdapter:
         *,
         tx: Optional[Any] = None,
     ) -> JsonDict:
-        """UPDATE … SET field = LEAST(field, value) WHERE id=id_value RETURNING *."""
         table = validate_table_name(table)
         validate_column_name(field)
         validate_column_name(id_field)
@@ -1077,11 +917,10 @@ class PostgreSQLAdapter:
                 self._return_connection(conn)
 
     # ---------------------------------------------------------------------
-    # SAVEPOINTS (nested transaction support)
+    # SAVEPOINTS
     # ---------------------------------------------------------------------
 
     def begin_savepoint(self, name: str, tx: Any) -> None:
-        """Create a savepoint within an existing transaction."""
         try:
             with tx.cursor() as cur:
                 cur.execute(f"SAVEPOINT {name}")
@@ -1089,7 +928,6 @@ class PostgreSQLAdapter:
             raise DatabaseError(f"begin_savepoint({name!r}) failed: {str(e)}")
 
     def rollback_to_savepoint(self, name: str, tx: Any) -> None:
-        """Roll back to a previously created savepoint."""
         try:
             with tx.cursor() as cur:
                 cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
@@ -1097,7 +935,6 @@ class PostgreSQLAdapter:
             raise DatabaseError(f"rollback_to_savepoint({name!r}) failed: {str(e)}")
 
     def release_savepoint(self, name: str, tx: Any) -> None:
-        """Release (destroy) a savepoint, making it permanent within the transaction."""
         try:
             with tx.cursor() as cur:
                 cur.execute(f"RELEASE SAVEPOINT {name}")
@@ -1110,11 +947,6 @@ class PostgreSQLAdapter:
 
     @contextmanager
     def distributed_lock(self, lock_name: str) -> Iterator[None]:
-        """
-        PostgreSQL advisory lock (session scoped).
-        - Always unlock before returning the pooled connection.
-        - Never wrap exceptions raised by the user block.
-        """
         conn = None
         cursor = None
         lock_id = int(hashlib.sha256(lock_name.encode()).hexdigest(), 16) % (2**63)
@@ -1122,8 +954,6 @@ class PostgreSQLAdapter:
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
-
-            # Acquire lock (DB op) — if this fails, it's a DatabaseError
             try:
                 cursor.execute("SELECT pg_advisory_lock(%s);", (lock_id,))
                 self.logger.debug("Acquired distributed lock: %s", lock_name)
@@ -1131,21 +961,15 @@ class PostgreSQLAdapter:
                 raise DatabaseError(f"Distributed lock acquire failed: {e}") from e
 
             try:
-                # User code runs here. If it raises, it MUST propagate unchanged.
                 yield
             finally:
-                # Release lock (DB op). Always attempted.
                 try:
                     cursor.execute("SELECT pg_advisory_unlock(%s);", (lock_id,))
                     self.logger.debug("Released distributed lock: %s", lock_name)
                 except Exception as e:
-                    # IMPORTANT: don't mask user exceptions.
-                    # If unlock fails, raise DatabaseError only if user block didn't already fail.
-                    # Easiest safe behavior: just log and continue.
                     self.logger.exception(
                         "Distributed lock release failed for %s: %s", lock_name, e
                     )
-
         finally:
             if cursor:
                 try:
