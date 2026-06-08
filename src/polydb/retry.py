@@ -3,18 +3,18 @@
 Retry logic with exponential backoff and metrics hooks
 """
 
-import functools
 import time
 import logging
 from functools import wraps
-from typing import Callable, Optional, Tuple, Type
+from typing import Callable, Tuple, Type
+
 logger = logging.getLogger(__name__)
 
 _NON_RETRYABLE_MARKERS = (
-    "23505",                          # Postgres unique_violation
-    "23503",                          # Postgres foreign_key_violation
-    "23502",                          # Postgres not_null_violation
-    "23514",                          # Postgres check_violation
+    "23505",  # Postgres unique_violation
+    "23503",  # Postgres foreign_key_violation
+    "23502",  # Postgres not_null_violation
+    "23514",  # Postgres check_violation
     "duplicate key value violates",
     "unique constraint",
     "UniqueViolation",
@@ -87,8 +87,18 @@ def retry(
                     MetricsHooks.on_query_end(func.__name__, duration, True)
                     return result
                 except exceptions as e:
-                    attempt += 1
                     duration = time.time() - start_time
+
+                    # Permanent errors (unique / FK / not-null / check
+                    # violations, etc.) are never transient. Fail fast so the
+                    # caller's insert->update fallthrough fires immediately
+                    # instead of burning the full backoff window.
+                    if _is_non_retryable(e):
+                        MetricsHooks.on_query_end(func.__name__, duration, False)
+                        MetricsHooks.on_error(func.__name__, e)
+                        raise
+
+                    attempt += 1
                     MetricsHooks.on_query_end(func.__name__, duration, False)
                     MetricsHooks.on_error(func.__name__, e)
 

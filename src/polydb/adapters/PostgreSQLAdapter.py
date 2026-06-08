@@ -1,15 +1,15 @@
 # src/polydb/adapters/postgres.py
-import datetime
-from decimal import Decimal
 import os
 import threading
 from typing import Any, Iterator, List, Optional, Tuple, Union
 import hashlib
 from contextlib import contextmanager
 import json
+from decimal import Decimal
 from datetime import datetime, date
 
 import psycopg2.extensions
+from psycopg2.extras import Json
 
 from ..errors import DatabaseError, ConnectionError
 from ..retry import retry
@@ -158,7 +158,7 @@ class PostgreSQLAdapter:
             if self._pool:
                 try:
                     self._pool.closeall()
-                except:
+                except Exception:
                     pass
                 self._pool = None
             self._initialize_pool()
@@ -194,8 +194,9 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
     def _json_safe(self, obj: Any):
         """
-        Ensure JSON serialization never fails.
-        Used only for Json() wrapping.
+        Ensure JSON serialization never fails. Used only for Json() wrapping.
+        Recurses into dicts, lists, AND tuples so nested datetime/Decimal
+        values are made safe at any depth.
         """
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -205,66 +206,68 @@ class PostgreSQLAdapter:
             return str(obj)
         if isinstance(obj, dict):
             return {k: self._json_safe(v) for k, v in obj.items()}
-        if isinstance(obj, list):
+        if isinstance(obj, (list, tuple)):
             return [self._json_safe(v) for v in obj]
         return obj
 
     def _serialize_value(self, v: Any) -> Any:
         """
-        Make outgoing values safe for psycopg2 across mixed column types.
+        Serialize a value being WRITTEN to a column (insert / update SET /
+        upsert data values).
 
-        Rules:
-        None / empty list / empty dict   -> None  (becomes NULL on any column)
-        list of primitives (str/int/...) -> native list (psycopg2 maps to TEXT[]/INT[])
-        list containing dicts            -> Json(list)  (for JSONB columns)
-        dict                             -> Json(dict)
-        datetime/date                    -> native
-        Decimal                          -> float
-        everything else                  -> as-is
+        This platform provisions every ARRAY and OBJECT field as a JSONB
+        column (SchemaProvisioner._FIELD_TO_SQL_TYPE never emits a native
+        text[]/int[] column), so dicts AND lists/tuples are ALWAYS
+        JSON-encoded via psycopg2's Json adapter.
+
+        Json() handles empty {} and [] correctly ('{}'::jsonb / '[]'::jsonb),
+        handles nesting, and never produces a quoted string — which is what
+        broke the earlier native-list, json.dumps, and NULL-ify-empties
+        attempts. Empties are NOT turned into NULL: an empty JSONB array/
+        object is a valid, meaningful value.
         """
-        # NULL-ify empties so they're valid for TEXT[], JSONB, and plain columns alike.
-        from psycopg2.extras import Json
-
         if v is None:
             return None
-        if isinstance(v, (list, tuple)) and len(v) == 0:
-            return None
-        if isinstance(v, dict) and len(v) == 0:
-            return None
-
-        # Dict -> JSONB
-        if isinstance(v, dict):
+        if isinstance(v, (dict, list, tuple)):
             return Json(self._json_safe(v))
-
-        # List: route by element type.
-        if isinstance(v, (list, tuple)):
-            v = list(v)
-            # If ANY element is a dict, treat as JSON payload (for JSONB columns).
-            if any(isinstance(x, dict) for x in v):
-                return Json(v)
-            # If ALL elements are primitives, send as native list for TEXT[]/INT[].
-            if all(isinstance(x, (str, int, float, bool, type(None))) for x in v):
-                return v
-            # Mixed / nested -> safest is JSONB
-            return Json(v)
-
-        # Datetime / date
         if isinstance(v, (datetime, date)):
             return v
-
-        # Decimal
         if isinstance(v, Decimal):
             return float(v)
+        return v
 
+    def _serialize_param(self, v: Any) -> Any:
+        """
+        Serialize a value used as a QUERY PARAMETER (WHERE values, IN / ANY
+        lists, LIMIT/OFFSET, raw execute() params).
+
+        Unlike _serialize_value, primitive lists/tuples are kept NATIVE so
+        that ``IN %s`` / ``= ANY(%s)`` parameters expand correctly. A dict
+        (or a list that contains dicts) is JSON-encoded so it can be compared
+        against a JSONB column.
+        """
+        if v is None:
+            return None
+        if isinstance(v, dict):
+            return Json(self._json_safe(v))
+        if isinstance(v, (list, tuple)):
+            seq = list(v)
+            if any(isinstance(x, dict) for x in seq):
+                return Json(self._json_safe(seq))
+            return seq  # native -> psycopg2 expands for IN / ANY
+        if isinstance(v, (datetime, date)):
+            return v
+        if isinstance(v, Decimal):
+            return float(v)
         return v
 
     def _serialize_params(self, params: List[Any]) -> List[Any]:
-        return [self._serialize_value(p) for p in params]
+        return [self._serialize_param(p) for p in params]
 
     def _deserialize_row(self, row: JsonDict) -> JsonDict:
         """
-        Postgres JSON/JSONB often comes back as dict already depending on driver config.
-        If it comes as a string, try json.loads safely.
+        Postgres JSON/JSONB often comes back as dict/list already depending on
+        driver config. If it comes as a string, try json.loads safely.
         """
         for k, v in list(row.items()):
             if isinstance(v, str):
@@ -444,6 +447,7 @@ class PostgreSQLAdapter:
             cursor = conn.cursor()
 
             set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
+            # SET values are written into columns -> write serializer (JSONB).
             params: List[Any] = [self._serialize_value(v) for v in data.values()]
 
             if isinstance(entity_id, dict):
@@ -454,7 +458,8 @@ class PostgreSQLAdapter:
                         where_parts.append(f"{k} IS NULL")
                     else:
                         where_parts.append(f"{k} = %s")
-                        params.append(self._serialize_value(v))
+                        # WHERE values are query params -> param serializer.
+                        params.append(self._serialize_param(v))
                 where_clause = " AND ".join(where_parts)
             else:
                 where_clause = "id = %s"
@@ -580,7 +585,8 @@ class PostgreSQLAdapter:
                         where_parts.append(f"{k} IS NULL")
                     else:
                         where_parts.append(f"{k} = %s")
-                        params.append(self._serialize_value(v))
+                        # WHERE values are query params -> param serializer.
+                        params.append(self._serialize_param(v))
                 where_clause = " AND ".join(where_parts)
             else:
                 where_clause = "id = %s"
