@@ -26,6 +26,7 @@ from .errors import (
     UnsupportedStorageTypeError,
     AdapterConfigurationError,
     OperationNotSupportedError,
+    InsufficientBalanceError,
 )
 
 __all__ = [
@@ -55,4 +56,5 @@ __all__ = [
     "UnsupportedStorageTypeError",
     "AdapterConfigurationError",
     "OperationNotSupportedError",
+    "InsufficientBalanceError",
 ]

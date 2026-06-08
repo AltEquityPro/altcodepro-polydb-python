@@ -80,3 +80,9 @@ class OperationNotSupportedError(PolyDBError):
     """Raised when an adapter cannot perform a requested operation."""
 
     pass
+
+
+class InsufficientBalanceError(PolyDBError):
+    """Raised when an atomic decrement is attempted but the balance is insufficient."""
+
+    pass
