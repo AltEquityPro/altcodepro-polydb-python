@@ -1,6 +1,7 @@
 # src/polydb/adapters/postgres.py
 import os
 import threading
+import time
 from typing import Any, Iterator, List, Optional, Tuple, Union
 import hashlib
 from contextlib import contextmanager
@@ -25,6 +26,7 @@ class PostgreSQLAdapter:
         from ..utils import setup_logger
 
         self.logger = setup_logger(__name__)
+        self._slow_query_ms: float = float(os.getenv("POLYDB_SLOW_QUERY_MS", "1000"))
         self.connection_string = connection_string or os.getenv(
             "POSTGRES_CONNECTION_STRING",
             os.getenv("POSTGRES_URL", ""),
@@ -148,6 +150,49 @@ class PostgreSQLAdapter:
         if self._pool and conn:
             self._drain_transaction(conn)
             self._pool.putconn(conn)
+
+    # ---------------------------------------------------------------------
+    # QUERY TIMING HELPER
+    # ---------------------------------------------------------------------
+
+    def _timed_execute(
+        self,
+        cursor: Any,
+        sql: str,
+        params: Any,
+        *,
+        operation: str = "execute",
+        table: str = "",
+    ) -> float:
+        """
+        Execute ``cursor.execute(sql, params)`` and return elapsed milliseconds.
+
+        Logs at DEBUG level with operation/table/duration_ms, and emits a
+        WARNING if the query exceeds ``POLYDB_SLOW_QUERY_MS`` (default 1000 ms).
+        """
+        t0 = time.perf_counter()
+        cursor.execute(sql, params)
+        duration_ms = (time.perf_counter() - t0) * 1000.0
+
+        self.logger.debug(
+            "SQL executed",
+            extra={
+                "operation": operation,
+                "table": table,
+                "duration_ms": round(duration_ms, 3),
+            },
+        )
+
+        if duration_ms > self._slow_query_ms:
+            self.logger.warning(
+                "Slow query detected: operation=%s table=%s duration_ms=%.1f threshold=%.1f",
+                operation,
+                table,
+                duration_ms,
+                self._slow_query_ms,
+            )
+
+        return duration_ms
 
     # ---------------------------------------------------------------------
     # TRANSACTIONS
@@ -306,7 +351,7 @@ class PostgreSQLAdapter:
             query = f"INSERT INTO {table} ({columns}) VALUES ({placeholders}) RETURNING *"
 
             values = [self._serialize_value(v) for v in data.values()]
-            cursor.execute(query, values)
+            self._timed_execute(cursor, query, values, operation="insert", table=table)
 
             result_row = cursor.fetchone()
             columns_list = [desc[0] for desc in cursor.description]
@@ -378,7 +423,9 @@ class PostgreSQLAdapter:
                 sql += " OFFSET %s"
                 params.append(offset)
 
-            cursor.execute(sql, self._serialize_params(params))
+            self._timed_execute(
+                cursor, sql, self._serialize_params(params), operation="select", table=table
+            )
             columns = [desc[0] for desc in cursor.description]
             results = [self._deserialize_row(dict(zip(columns, row))) for row in cursor.fetchall()]
             cursor.close()
@@ -466,7 +513,7 @@ class PostgreSQLAdapter:
                 params.append(entity_id)
 
             query = f"UPDATE {table} SET {set_clause} WHERE {where_clause} RETURNING *"
-            cursor.execute(query, params)
+            self._timed_execute(cursor, query, params, operation="update", table=table)
 
             result_row = cursor.fetchone()
             if not result_row:
@@ -528,7 +575,7 @@ class PostgreSQLAdapter:
             """
 
             values = [self._serialize_value(v) for v in data.values()]
-            cursor.execute(query, values)
+            self._timed_execute(cursor, query, values, operation="upsert", table=table)
 
             result_row = cursor.fetchone()
             if not result_row:
@@ -593,7 +640,7 @@ class PostgreSQLAdapter:
                 params.append(entity_id)
 
             query = f"DELETE FROM {table} WHERE {where_clause} RETURNING *"
-            cursor.execute(query, params)
+            self._timed_execute(cursor, query, params, operation="delete", table=table)
             result_row = cursor.fetchone()
 
             if not result_row:
@@ -717,7 +764,9 @@ class PostgreSQLAdapter:
             # EXECUTE
             # ------------------------------------------------
 
-            cursor.execute(sql, self._serialize_params(params))
+            self._timed_execute(
+                cursor, sql, self._serialize_params(params), operation="query_linq", table=table
+            )
 
             if builder.count_only:
                 result = cursor.fetchone()[0]
@@ -774,7 +823,7 @@ class PostgreSQLAdapter:
             self.logger.debug("Executing raw SQL: %s", sql)
 
             exec_params = self._serialize_params(params or [])
-            cursor.execute(sql, exec_params)
+            self._timed_execute(cursor, sql, exec_params, operation="execute", table="")
 
             if fetch_one:
                 row = cursor.fetchone()
