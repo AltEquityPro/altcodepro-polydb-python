@@ -11,7 +11,7 @@ from datetime import datetime, date
 import psycopg2.extensions
 from psycopg2.extras import Json
 
-from ..errors import DatabaseError, ConnectionError
+from ..errors import DatabaseError, ConnectionError, InsufficientBalanceError
 from ..retry import retry
 from ..utils import validate_table_name, validate_column_name
 from ..query import QueryBuilder
@@ -814,6 +814,105 @@ class PostgreSQLAdapter:
                     pass
             if own_conn and conn:
                 self._return_connection(conn)
+
+    # ---------------------------------------------------------------------
+    # ATOMIC DECREMENT
+    # ---------------------------------------------------------------------
+
+    def atomic_decrement_if_sufficient(
+        self,
+        table: str,
+        balance_field: str,
+        amount: Any,
+        where_field: str,
+        where_value: Any,
+        *,
+        tx: Optional[Any] = None,
+    ) -> JsonDict:
+        """Atomically decrement *balance_field* by *amount* where *where_field* = *where_value*,
+        but only if the current balance is >= *amount*.
+
+        Returns the updated row dict on success.
+        Raises InsufficientBalanceError if no row was updated (balance too low or row not found).
+        Raises DatabaseError on other failures.
+        """
+        table = validate_table_name(table)
+        validate_column_name(balance_field)
+        validate_column_name(where_field)
+
+        conn = tx
+        own_conn = False
+        if not conn:
+            conn = self._get_connection()
+            own_conn = True
+
+        try:
+            cursor = conn.cursor()
+            sql = (
+                f"UPDATE {table} "
+                f"SET {balance_field} = {balance_field} - %s "
+                f"WHERE {where_field} = %s AND {balance_field} >= %s "
+                f"RETURNING *"
+            )
+            cursor.execute(sql, [amount, where_value, amount])
+            result_row = cursor.fetchone()
+
+            if not result_row:
+                if own_conn:
+                    conn.rollback()
+                raise InsufficientBalanceError(
+                    f"Insufficient balance in {table}.{balance_field} for {where_field}={where_value!r}"
+                )
+
+            columns = [desc[0] for desc in cursor.description]
+            result = dict(zip(columns, result_row))
+
+            if own_conn:
+                conn.commit()
+
+            cursor.close()
+            return self._deserialize_row(result)
+
+        except InsufficientBalanceError:
+            raise
+        except Exception as e:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise DatabaseError(f"atomic_decrement_if_sufficient failed: {str(e)}")
+        finally:
+            if own_conn and conn:
+                self._return_connection(conn)
+
+    # ---------------------------------------------------------------------
+    # SAVEPOINTS (nested transaction support)
+    # ---------------------------------------------------------------------
+
+    def begin_savepoint(self, name: str, tx: Any) -> None:
+        """Create a savepoint within an existing transaction."""
+        try:
+            with tx.cursor() as cur:
+                cur.execute(f"SAVEPOINT {name}")
+        except Exception as e:
+            raise DatabaseError(f"begin_savepoint({name!r}) failed: {str(e)}")
+
+    def rollback_to_savepoint(self, name: str, tx: Any) -> None:
+        """Roll back to a previously created savepoint."""
+        try:
+            with tx.cursor() as cur:
+                cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+        except Exception as e:
+            raise DatabaseError(f"rollback_to_savepoint({name!r}) failed: {str(e)}")
+
+    def release_savepoint(self, name: str, tx: Any) -> None:
+        """Release (destroy) a savepoint, making it permanent within the transaction."""
+        try:
+            with tx.cursor() as cur:
+                cur.execute(f"RELEASE SAVEPOINT {name}")
+        except Exception as e:
+            raise DatabaseError(f"release_savepoint({name!r}) failed: {str(e)}")
 
     # ---------------------------------------------------------------------
     # DISTRIBUTED LOCK
