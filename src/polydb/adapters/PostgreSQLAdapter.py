@@ -10,6 +10,7 @@ from decimal import Decimal
 from datetime import datetime, date
 
 import psycopg2.extensions
+from psycopg2 import sql as pg_sql
 from psycopg2.extras import Json
 
 from ..errors import DatabaseError, ConnectionError, InsufficientBalanceError
@@ -42,15 +43,12 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
 
     def _is_idle(self, conn) -> bool:
-        """True iff the connection is not inside a (possibly aborted) transaction."""
         try:
             return conn.info.transaction_status == psycopg2.extensions.TRANSACTION_STATUS_IDLE
         except Exception:
             return False
 
     def _drain_transaction(self, conn) -> None:
-        """Force the connection back to IDLE so it's safe to change session
-        settings (e.g. autocommit). Safe to call when already idle."""
         if self._is_idle(conn):
             return
         try:
@@ -59,7 +57,6 @@ class PostgreSQLAdapter:
             pass
 
     def _ping_connection(self, conn) -> bool:
-        """Test if connection is still alive."""
         try:
             with conn.cursor() as cur:
                 cur.execute("SELECT 1")
@@ -94,7 +91,6 @@ class PostgreSQLAdapter:
                 parsed = parsed._replace(query=new_query)
                 dsn = urlunparse(parsed)
 
-            # H14: default raised from 30 → 100 to handle production concurrency
             _maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
             with self._lock:
                 if not self._pool:
@@ -112,12 +108,10 @@ class PostgreSQLAdapter:
             raise ConnectionError(f"Failed to initialize PostgreSQL pool: {str(e)}")
 
     def _log_pool_utilization(self) -> None:
-        """Warn when pool is >80% exhausted."""
         if not self._pool:
             return
         try:
             maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
-            # psycopg2 ThreadedConnectionPool stores borrowed conns in ._used
             used_count = len(getattr(self._pool, "_used", {}))
             pct = (used_count / maxconn * 100) if maxconn else 0
             if pct > 80:
@@ -172,11 +166,7 @@ class PostgreSQLAdapter:
 
         self.logger.debug(
             "SQL executed",
-            extra={
-                "operation": operation,
-                "table": table,
-                "duration_ms": round(duration_ms, 3),
-            },
+            extra={"operation": operation, "table": table, "duration_ms": round(duration_ms, 3)},
         )
 
         if duration_ms > self._slow_query_ms:
@@ -190,6 +180,7 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
     # TRANSACTIONS
     # ---------------------------------------------------------------------
+
     def reset_pool(self):
         with self._lock:
             if self._pool:
@@ -219,6 +210,7 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
     # JSON HELPERS
     # ---------------------------------------------------------------------
+
     def _json_safe(self, obj: Any):
         if isinstance(obj, datetime):
             return obj.isoformat()
@@ -679,7 +671,8 @@ class PostgreSQLAdapter:
         cursor = None
         try:
             cursor = conn.cursor()
-            self.logger.debug("Executing raw SQL: %s", sql)
+            # Log operation shape only, never parameter values
+            self.logger.debug("Executing raw SQL (%d params)", len(params or []))
             exec_params = self._serialize_params(params or [])
             self._timed_execute(cursor, sql, exec_params, operation="execute", table="")
 
@@ -918,26 +911,27 @@ class PostgreSQLAdapter:
 
     # ---------------------------------------------------------------------
     # SAVEPOINTS
+    # Security: use pg_sql.Identifier to prevent SQL injection via savepoint names.
     # ---------------------------------------------------------------------
 
     def begin_savepoint(self, name: str, tx: Any) -> None:
         try:
             with tx.cursor() as cur:
-                cur.execute(f"SAVEPOINT {name}")
+                cur.execute(pg_sql.SQL("SAVEPOINT {}").format(pg_sql.Identifier(name)))
         except Exception as e:
             raise DatabaseError(f"begin_savepoint({name!r}) failed: {str(e)}")
 
     def rollback_to_savepoint(self, name: str, tx: Any) -> None:
         try:
             with tx.cursor() as cur:
-                cur.execute(f"ROLLBACK TO SAVEPOINT {name}")
+                cur.execute(pg_sql.SQL("ROLLBACK TO SAVEPOINT {}").format(pg_sql.Identifier(name)))
         except Exception as e:
             raise DatabaseError(f"rollback_to_savepoint({name!r}) failed: {str(e)}")
 
     def release_savepoint(self, name: str, tx: Any) -> None:
         try:
             with tx.cursor() as cur:
-                cur.execute(f"RELEASE SAVEPOINT {name}")
+                cur.execute(pg_sql.SQL("RELEASE SAVEPOINT {}").format(pg_sql.Identifier(name)))
         except Exception as e:
             raise DatabaseError(f"release_savepoint({name!r}) failed: {str(e)}")
 
