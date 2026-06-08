@@ -886,6 +886,147 @@ class PostgreSQLAdapter:
             if own_conn and conn:
                 self._return_connection(conn)
 
+    def atomic_set_if(
+        self,
+        table: str,
+        id_field: str,
+        id_value: Any,
+        field: str,
+        value: Any,
+        expected: Any,
+        *,
+        tx: Optional[Any] = None,
+    ) -> Optional[JsonDict]:
+        """Compare-and-swap: UPDATE … SET field=value WHERE id=id_value AND field=expected RETURNING *.
+        Returns the updated row dict if the swap succeeded, None if the field
+        no longer held the expected value (concurrent write won).
+        """
+        table = validate_table_name(table)
+        validate_column_name(field)
+        validate_column_name(id_field)
+
+        conn = tx
+        own_conn = not conn
+        if own_conn:
+            conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            sql = (
+                f"UPDATE {table} SET {field} = %s "
+                f"WHERE {id_field} = %s AND {field} = %s RETURNING *"
+            )
+            cursor.execute(sql, [value, id_value, expected])
+            row = cursor.fetchone()
+            if own_conn:
+                conn.commit()
+            cursor.close()
+            if row is None:
+                return None
+            cols = [d[0] for d in cursor.description]
+            return self._deserialize_row(dict(zip(cols, row)))
+        except Exception as e:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise DatabaseError(f"atomic_set_if failed: {e}") from e
+        finally:
+            if own_conn and conn:
+                self._return_connection(conn)
+
+    def atomic_max(
+        self,
+        table: str,
+        id_field: str,
+        id_value: Any,
+        field: str,
+        value: Any,
+        *,
+        tx: Optional[Any] = None,
+    ) -> JsonDict:
+        """UPDATE … SET field = GREATEST(field, value) WHERE id=id_value RETURNING *."""
+        table = validate_table_name(table)
+        validate_column_name(field)
+        validate_column_name(id_field)
+
+        conn = tx
+        own_conn = not conn
+        if own_conn:
+            conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE {table} SET {field} = GREATEST({field}, %s) WHERE {id_field} = %s RETURNING *",
+                [value, id_value],
+            )
+            row = cursor.fetchone()
+            if own_conn:
+                conn.commit()
+            cursor.close()
+            if row is None:
+                raise DatabaseError(f"atomic_max: row not found {id_field}={id_value!r}")
+            cols = [d[0] for d in cursor.description]
+            return self._deserialize_row(dict(zip(cols, row)))
+        except DatabaseError:
+            raise
+        except Exception as e:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise DatabaseError(f"atomic_max failed: {e}") from e
+        finally:
+            if own_conn and conn:
+                self._return_connection(conn)
+
+    def atomic_min(
+        self,
+        table: str,
+        id_field: str,
+        id_value: Any,
+        field: str,
+        value: Any,
+        *,
+        tx: Optional[Any] = None,
+    ) -> JsonDict:
+        """UPDATE … SET field = LEAST(field, value) WHERE id=id_value RETURNING *."""
+        table = validate_table_name(table)
+        validate_column_name(field)
+        validate_column_name(id_field)
+
+        conn = tx
+        own_conn = not conn
+        if own_conn:
+            conn = self._get_connection()
+        try:
+            cursor = conn.cursor()
+            cursor.execute(
+                f"UPDATE {table} SET {field} = LEAST({field}, %s) WHERE {id_field} = %s RETURNING *",
+                [value, id_value],
+            )
+            row = cursor.fetchone()
+            if own_conn:
+                conn.commit()
+            cursor.close()
+            if row is None:
+                raise DatabaseError(f"atomic_min: row not found {id_field}={id_value!r}")
+            cols = [d[0] for d in cursor.description]
+            return self._deserialize_row(dict(zip(cols, row)))
+        except DatabaseError:
+            raise
+        except Exception as e:
+            if own_conn:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
+            raise DatabaseError(f"atomic_min failed: {e}") from e
+        finally:
+            if own_conn and conn:
+                self._return_connection(conn)
+
     # ---------------------------------------------------------------------
     # SAVEPOINTS (nested transaction support)
     # ---------------------------------------------------------------------
