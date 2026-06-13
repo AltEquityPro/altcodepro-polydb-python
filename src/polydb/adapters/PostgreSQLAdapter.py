@@ -129,8 +129,10 @@ class PostgreSQLAdapter:
         try:
             conn = self._pool.getconn()  # type: ignore
 
-            if not self._ping_connection(conn):
-                self.logger.warning("Stale connection detected from pool, closing and retrying")
+            # Only ping if the connection is in an error state (closed/broken),
+            # not on every call. TCP keepalives handle staleness detection.
+            if conn.closed:
+                self.logger.warning("Closed connection detected from pool, closing and retrying")
                 self._pool.putconn(conn, close=True)  # type: ignore
                 conn = self._pool.getconn()  # type: ignore
                 self._drain_transaction(conn)
