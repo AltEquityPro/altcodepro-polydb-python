@@ -426,7 +426,10 @@ class DatabaseFactory:
                 after_plain = self.encryption.decrypt_fields(result, encrypted_fields)
             success = True
             if self._enable_cache and self._cache:
-                self._cache.invalidate(name)
+                try:
+                    self._cache.invalidate(name)
+                except Exception as _ce:
+                    logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
         try:
@@ -484,7 +487,10 @@ class DatabaseFactory:
                 raw = [self.encryption.decrypt_fields(r, encrypted_fields) for r in raw]
             if self._cache and use_external_cache and not no_cache:
                 ttl = cache_ttl or getattr(meta, "cache_ttl", 300)
-                self._cache.set(name, query or {}, raw, ttl)
+                try:
+                    self._cache.set(name, query or {}, raw, ttl)
+                except Exception as _ce:
+                    logger.warning("Cache set failed (non-fatal): %s", _ce)
             return raw
 
         # Check external cache first
@@ -591,7 +597,10 @@ class DatabaseFactory:
                 after_plain = self.encryption.decrypt_fields(result, encrypted_fields)
             success = True
             if self._enable_cache and self._cache:
-                self._cache.invalidate(name)
+                try:
+                    self._cache.invalidate(name)
+                except Exception as _ce:
+                    logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
         try:
@@ -648,7 +657,10 @@ class DatabaseFactory:
                 after_plain = self.encryption.decrypt_fields(result, encrypted_fields)
             success = True
             if self._enable_cache and self._cache:
-                self._cache.invalidate(name)
+                try:
+                    self._cache.invalidate(name)
+                except Exception as _ce:
+                    logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
         try:
@@ -715,7 +727,10 @@ class DatabaseFactory:
                 result = adapters.nosql.delete(cls, entity_id, etag=etag)
             success = True
             if self._enable_cache and self._cache:
-                self._cache.invalidate(name)
+                try:
+                    self._cache.invalidate(name)
+                except Exception as _ce:
+                    logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return result
 
         try:
