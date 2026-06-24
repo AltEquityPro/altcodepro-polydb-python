@@ -3,8 +3,8 @@
 Data models and configurations
 """
 
-from dataclasses import dataclass
-from typing import Optional, List, Callable, Any
+from dataclasses import dataclass, field
+from typing import Optional, List, Callable, Any, Dict
 from enum import Enum
 
 
@@ -41,6 +41,38 @@ class QueryOptions:
     take: Optional[int] = None
     select_fields: Optional[List[str]] = None
     count_only: bool = False
+
+
+@dataclass
+class BackendCapabilities:
+    """Describes what a storage backend can push down natively."""
+
+    server_order: bool = False
+    server_filter: bool = False
+    native_cursor: bool = False
+    supports_count: bool = True
+
+
+@dataclass
+class PageRequest:
+    """Unified pagination request passed to query_paged()."""
+
+    filters: Optional[Dict[str, Any]] = None
+    order_by: Optional[str] = None
+    order_desc: bool = False
+    limit: int = 50
+    cursor: Optional[str] = None
+    fields: Optional[List[str]] = None
+
+
+@dataclass
+class PageResult:
+    """Unified pagination result returned by query_paged()."""
+
+    items: List[Any] = field(default_factory=list)
+    next_cursor: Optional[str] = None
+    has_more: bool = False
+    total: Optional[int] = None
 
 
 # ============================================================
