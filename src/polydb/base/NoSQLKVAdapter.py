@@ -1,6 +1,7 @@
 # src/polydb/adapters/NoSQLKVAdapter.py
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 import threading
@@ -317,3 +318,58 @@ class NoSQLKVAdapter:
             results = unique
 
         return results
+
+    # ---------------------------------------------------------------
+    # Generic pagination API (opaque cursor, works for all NoSQL)
+    # ---------------------------------------------------------------
+
+    @property
+    def capabilities(self) -> "BackendCapabilities":
+        from ..models import BackendCapabilities
+        return BackendCapabilities()
+
+    def _encode_cursor(self, data: dict) -> str:
+        return base64.b64encode(json.dumps(data, default=json_safe).encode()).decode()
+
+    def _decode_cursor(self, cursor: str) -> dict:
+        try:
+            return json.loads(base64.b64decode(cursor.encode()).decode())
+        except Exception:
+            return {}
+
+    def query_paged(self, model: type, request: "PageRequest") -> "PageResult":
+        """In-memory pagination with opaque offset cursor. Subclasses may override."""
+        from ..models import PageResult
+
+        offset = 0
+        if request.cursor:
+            cd = self._decode_cursor(request.cursor)
+            offset = cd.get("offset", 0)
+
+        builder = QueryBuilder()
+        for k, v in (request.filters or {}).items():
+            builder.where(k, Operator.EQ, v)
+        if request.order_by:
+            builder.order_by(request.order_by, descending=request.order_desc)
+        builder.skip(offset)
+        builder.take(request.limit + 1)
+        if request.fields:
+            builder.select_fields(request.fields)
+
+        results = self.query_linq(model, builder)
+        if isinstance(results, int):
+            return PageResult(items=[], has_more=False)
+
+        has_more = len(results) > request.limit
+        if has_more:
+            results = results[:request.limit]
+
+        next_cursor = None
+        if has_more:
+            next_cursor = self._encode_cursor({
+                "offset": offset + request.limit,
+                "order_by": request.order_by,
+                "desc": request.order_desc,
+            })
+
+        return PageResult(items=results, next_cursor=next_cursor, has_more=has_more)

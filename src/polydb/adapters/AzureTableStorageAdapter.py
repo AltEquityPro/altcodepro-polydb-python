@@ -31,9 +31,6 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # ensures model isolation across the same table
 _MODEL_FIELD = "__polydb_model__"
 
-# ─── NEW: HTTP transport tuning ──────────────────────────────────────────────
-# Default Azure SDK has no read timeout. A sync call from an async event loop
-# can park forever. These are overridable via env so ops can tune per env.
 _CONNECT_TIMEOUT = float(os.getenv("AZURE_TABLE_CONNECT_TIMEOUT", "10"))
 _READ_TIMEOUT = float(os.getenv("AZURE_TABLE_READ_TIMEOUT", "30"))
 _RETRY_TOTAL = int(os.getenv("AZURE_TABLE_RETRY_TOTAL", "3"))
@@ -50,15 +47,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     - Blob overflow for entities > 1MB
     - Model isolation using __polydb_model__
     - Always returns id (derived from RowKey if missing)
-
-    Performance / safety guarantees:
-    - One TableServiceClient per adapter instance.
-    - One TableClient cached per table for the adapter's lifetime.
-    - create_table_if_not_exists runs ONCE per table per adapter lifetime.
-    - Explicit connect/read timeouts on the HTTP transport so a slow or
-      mis-configured endpoint fails fast instead of hanging the caller.
-    - No mutation of instance state inside read/write paths (was the
-      previous `self._table_client = ...` race hazard).
     """
 
     AZURE_TABLE_MAX_SIZE = 60 * 1024  # 1MB
@@ -84,12 +72,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self._blob_service = None
         self._client_lock = threading.Lock()
 
-        # ─── NEW: caches ────────────────────────────────────────────────────
-        # _ensured_tables: table names for which create_table_if_not_exists
-        # has already succeeded on this adapter instance.
-        # _table_clients_cache: TableClient handles by table name.
-        # _cache_lock: protects both caches from concurrent get/put.
-        self._ensured_tables: set[str] = set()
+        self._ensured_tables: set = set()
         self._table_clients_cache: Dict[str, Any] = {}
         self._cache_lock = threading.Lock()
 
@@ -102,11 +85,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             with self._client_lock:
                 if not self._client:
-                    # ─── CHANGED: explicit transport timeouts + retry budget ──
-                    # connection_timeout / read_timeout are honoured by the
-                    # azure-core RequestsTransport. retry_total caps the
-                    # SDK's built-in retry policy so a hard failure surfaces
-                    # in seconds, not minutes.
                     self._client = TableServiceClient.from_connection_string(
                         self.connection_string,
                         connection_timeout=_CONNECT_TIMEOUT,
@@ -155,7 +133,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         if v is None:
             return None
 
-        # Treat empty containers as absent — let the row omit the property.
         if isinstance(v, (list, tuple, dict)) and len(v) == 0:
             return None
 
@@ -187,14 +164,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     def _decode_value(self, v: Any) -> Any:
         if isinstance(v, str):
             if v.startswith(_JSON_PREFIX):
-                payload = v[len(_JSON_PREFIX) :]
+                payload = v[len(_JSON_PREFIX):]
                 try:
                     return json.loads(payload)
                 except Exception:
                     return v
 
             if v.startswith(_BYTES_PREFIX):
-                payload = v[len(_BYTES_PREFIX) :].strip()
+                payload = v[len(_BYTES_PREFIX):].strip()
                 if (len(payload) % 4) == 1:
                     return v
                 if not _BASE64_RE.match(payload):
@@ -248,11 +225,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     # Entity pack/unpack
     # -----------------------------
     def _pack_entity(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
-        """Pack data into Azure Table Storage entity format.
-
-        This version is much simpler, more readable, and fixes the fragile
-        revmap/skey logic that was likely causing normal fields to disappear.
-        """
         entity: JsonDict = {
             "PartitionKey": pk,
             "RowKey": rk,
@@ -263,27 +235,21 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         for orig_key, orig_val in (data or {}).items():
             orig_key_str = str(orig_key)
 
-            # Skip Azure-reserved or special keys
             if orig_key_str in self._RESERVED or orig_key_str in ("PartitionKey", "RowKey"):
                 continue
 
-            # Sanitize property name so it is valid for Azure Table Storage
             skey = self._sanitize_prop_name(orig_key)
 
-            # Prevent key collisions (extremely rare but safe)
             base = skey
             counter = 1
             while skey in entity:
                 skey = f"{base}_{counter}"
                 counter += 1
 
-            # Remember the original key name so _unpack_entity can restore it
             keymap[skey] = orig_key_str
 
-            # Encode the value (must return something Azure Table accepts)
             entity[skey] = self._encode_value(orig_val)
 
-        # Store keymap only if we actually have fields (internal use)
         if keymap:
             entity["__keymap__"] = json.dumps(keymap, default=json_safe)
 
@@ -319,7 +285,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             if k in ("PartitionKey", "RowKey"):
                 continue
 
-            # keep internal metadata fields too
             if k.startswith("_") or k in (_MODEL_FIELD,):
                 out[k] = v
                 continue
@@ -327,14 +292,12 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             orig_key = keymap.get(k, k)
             out[orig_key] = self._decode_value(v)
 
-        # ✅ guarantee id for tests & ergonomics
         if "id" not in out and rk is not None:
             out["id"] = rk
 
         return out
 
     def _sanitize_blob_part(self, value: str) -> str:
-        # Blob-safe: lowercase, alphanumeric + dash only
         s = str(value).lower()
         s = re.sub(r"[^a-z0-9\-]", "-", s)
         s = re.sub(r"-+", "-", s)
@@ -346,8 +309,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     def _blob_key(self, pk: str, rk: str, checksum: str) -> str:
         safe_pk = self._sanitize_blob_part(pk)
         safe_rk = self._sanitize_blob_part(rk)
-
-        # Flat structure (avoid deep paths)
         return f"{safe_pk}-{safe_rk}-{checksum}.json"
 
     def _blob_upload(self, blob_key: str, data_bytes: bytes):
@@ -375,18 +336,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     # Required NoSQLKVAdapter hooks
     # -----------------------------
     def _sanitize_table_name(self, name: str) -> str:
-        """Convert collection_name to valid Azure Table name (alphanumeric only)."""
         if not name:
             return "defaulttable"
 
-        # Remove all invalid characters, keep only letters and numbers
         sanitized = re.sub(r"[^a-zA-Z0-9]", "", name)
 
-        # Must start with a letter
         if sanitized and sanitized[0].isdigit():
             sanitized = "t" + sanitized
 
-        # Must be 3-63 characters
         if len(sanitized) < 3:
             sanitized = sanitized + "table"
         if len(sanitized) > 63:
@@ -395,10 +352,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         return sanitized.lower()
 
     def _get_table_name(self, model: type) -> str:
-        """
-        Extract collection_name from UDL model definition.
-        """
-        # Primary source: UDL definition
         definition = getattr(model, "__udl_definition__", None)
         if definition:
             metadata = getattr(definition, "x_metadata", {}) or {}
@@ -406,41 +359,22 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             if collection_name:
                 return self._sanitize_table_name(collection_name)
 
-        # Fallback: __polydb__ metadata
         polydb_meta = getattr(model, "__polydb__", None)
         if isinstance(polydb_meta, dict):
             collection = polydb_meta.get("collection") or polydb_meta.get("collection_name")
             if collection:
                 return self._sanitize_table_name(str(collection))
 
-        # Last resort
         return os.getenv("AZURE_TABLE_NAME", "defaulttable") or "defaulttable"
 
     def _get_table_client(self, model: type):
-        """
-        Return a TableClient for the model, ensuring the table exists.
-
-        ─── CHANGED ────────────────────────────────────────────────────────
-        Both the table existence check AND the TableClient handle are now
-        cached per adapter instance. The previous version ran
-        create_table_if_not_exists on every read/write/query/delete — a
-        hot-loop seed of 100 records produced ~300 unnecessary network
-        round-trips. Now:
-
-          - First call for a table:  1 HTTP call (create_table_if_not_exists)
-                                     + 1 cheap local TableClient construction.
-          - All subsequent calls:    O(1) dict lookup, no network.
-        """
         table_name = self._get_table_name(model)
 
-        # Fast path: already ensured + client cached.
         cached = self._table_clients_cache.get(table_name)
         if cached is not None and table_name in self._ensured_tables:
             return cached
 
         with self._cache_lock:
-            # Re-check inside the lock to avoid duplicate ensures under
-            # concurrent first-touch.
             cached = self._table_clients_cache.get(table_name)
             already_ensured = table_name in self._ensured_tables
 
@@ -449,12 +383,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     self._client.create_table_if_not_exists(table_name)
                     logger.info(f"✅ Azure Table ensured/created: {table_name}")
                 except Exception as e:
-                    # TableAlreadyExists is normal and safe to ignore
                     msg = str(e)
                     if "TableAlreadyExists" not in msg and "already exists" not in msg.lower():
                         logger.warning(f"Could not create table {table_name}: {e}")
-                # Mark as ensured regardless — either it exists now or we
-                # logged the failure; we won't retry on every op.
                 self._ensured_tables.add(table_name)
 
             if cached is None:
@@ -464,19 +395,13 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             return cached
 
     def _restore_overflow_properties(self, entity_dict: JsonDict) -> JsonDict:
-        """Detect and restore any large properties stored in Blob Storage.
-
-        Called by both _get_raw and _query_raw.
-        """
         restored = {}
 
         for k, v in entity_dict.items():
-            # Internal fields (starting with _) are kept as-is
             if k.startswith("_"):
                 restored[k] = v
                 continue
 
-            # Is this an overflow metadata JSON string?
             if isinstance(v, str) and v.startswith("{") and '"_overflow":' in v:
                 try:
                     metadata = json.loads(v)
@@ -491,10 +416,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                         restored[k] = v
                         continue
 
-                    # Download real value from blob
                     blob_data = self._blob_download(blob_key)
 
-                    # Optional but very safe: checksum validation
                     if checksum:
                         actual_checksum = hashlib.md5(blob_data).hexdigest()
                         if actual_checksum != checksum:
@@ -502,7 +425,6 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                                 f"Checksum mismatch for blob {blob_key} (property '{k}')"
                             )
 
-                    # Restore original value
                     actual_value = json.loads(blob_data.decode("utf-8"))
                     restored[k] = actual_value
                     logger.debug(f"Restored large property '{k}' from blob: {blob_key}")
@@ -511,11 +433,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                 except Exception as e:
                     logger.error(f"Failed to restore overflow property '{k}': {e}")
-                    # Fall back to raw metadata instead of crashing
                     restored[k] = v
                     continue
 
-            # Normal (non-overflow) property
             restored[k] = v
 
         return restored
@@ -523,20 +443,11 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
-            # ─── CHANGED: local variable, not self._table_client ────────────
-            # The old pattern `self._table_client = self._get_table_client(...)`
-            # was a race hazard: two concurrent writes on different models
-            # could swap each other's client mid-call. Local variable is
-            # safe and identical in cost since the client is now cached.
             table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
-            # Pack entity (encoded for Azure Table)
             entity = self._pack_entity(model, safe_pk, safe_rk, data)
-            # ---------------------------------------------------
-            # SIZE ESTIMATION (use ORIGINAL payload, not packed)
-            # ---------------------------------------------------
-            MAX_PROPERTY_CHARS = 30 * 1024  # ~30K safe under UTF-16 32K limit
+            MAX_PROPERTY_CHARS = 30 * 1024
 
             def _is_large_string(val: Any) -> bool:
                 return isinstance(val, str) and len(val) > MAX_PROPERTY_CHARS
@@ -573,7 +484,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     continue
                 if k in large_val_dict:
                     metadata = large_val_dict[k]
-                    reference_entity[k] = json.dumps(metadata, default=json_safe)  # ← JSON string
+                    reference_entity[k] = json.dumps(metadata, default=json_safe)
                     logger.info(f"Overflow reference stored for {k} → {metadata['_blob_key']}")
                 else:
                     reference_entity[k] = v
@@ -596,17 +507,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         try:
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
-            # ─── CHANGED: local variable ────────────────────────────────────
             table_client = self._get_table_client(model)
 
             entity = table_client.get_entity(safe_pk, safe_rk)
             entity_dict = dict(entity)
 
-            # Model isolation check
             if entity_dict.get(_MODEL_FIELD) != model.__qualname__:
                 return None
 
-            # Restore any large fields that were moved to blob
             restored_entity = self._restore_overflow_properties(entity_dict)
 
             out = self._unpack_entity(restored_entity)
@@ -625,10 +533,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         self, model: type, filters: Dict[str, Any], limit: Optional[int]
     ) -> List[JsonDict]:
         try:
-            # ─── CHANGED: local variable ────────────────────────────────────
             table_client = self._get_table_client(model)
 
-            # Build query filter (your original logic kept unchanged)
             eff_filters = dict(filters or {})
             parts: List[str] = []
             for orig_k, orig_v in eff_filters.items():
@@ -670,12 +576,10 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             for ent in entities:
                 ent_dict = dict(ent)
 
-                # Restore any large fields from blob
                 restored_entity = self._restore_overflow_properties(ent_dict)
 
                 out = self._unpack_entity(restored_entity)
 
-                # Guarantee 'id' field
                 if "id" not in out and "RowKey" in ent_dict:
                     out["id"] = ent_dict["RowKey"]
 
@@ -693,12 +597,10 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _delete_raw(self, model: type, pk: str, rk: str, etag: Optional[str]) -> JsonDict:
         try:
-            # ─── CHANGED: local variable ────────────────────────────────────
             table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
 
-            # read to check model + overflow
             try:
                 entity = table_client.get_entity(safe_pk, safe_rk)
                 entity_dict = dict(entity)
@@ -720,15 +622,99 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             raise NoSQLError(f"Azure Table delete failed: {str(e)}")
 
     # -----------------------------
+    # Pagination overrides
+    # -----------------------------
+
+    @property
+    def capabilities(self):
+        from ..models import BackendCapabilities
+        return BackendCapabilities(
+            server_order=False,
+            server_filter=True,
+            native_cursor=True,
+            supports_count=False,
+        )
+
+    def query_paged(self, model: type, request) -> "PageResult":
+        """Use Azure native continuation tokens when no ORDER BY; fall back to in-memory sort."""
+        from ..models import PageResult
+
+        if request.order_by:
+            # Azure Table has no ORDER BY — fall back to in-memory sort via base class
+            return super().query_paged(model, request)
+
+        table_client = self._get_table_client(model)
+        eff_filters = dict(request.filters or {})
+        parts: List[str] = []
+        for orig_k, orig_v in eff_filters.items():
+            if orig_v is None:
+                continue
+            if orig_k in ("partition_key", "PartitionKey"):
+                sk = "PartitionKey"
+            elif orig_k in ("row_key", "RowKey"):
+                sk = "RowKey"
+            else:
+                sk = self._sanitize_prop_name(orig_k)
+            ev = self._encode_value(orig_v)
+            if ev is None:
+                parts.append(f"{sk} eq null")
+            elif isinstance(ev, bool):
+                parts.append(f"{sk} eq {str(ev).lower()}")
+            elif isinstance(ev, (int, float)):
+                parts.append(f"{sk} eq {ev}")
+            elif isinstance(ev, datetime):
+                iso = ev.isoformat()
+                if not iso.endswith("Z"):
+                    iso += "Z"
+                parts.append(f"{sk} eq datetime'{iso}'")
+            else:
+                sval = str(ev).replace("'", "''")
+                parts.append(f"{sk} eq '{sval}'")
+        query_filter = " and ".join(parts) if parts else None
+
+        azure_ct = None
+        if request.cursor:
+            cd = self._decode_cursor(request.cursor)
+            if cd.get("type") == "azure":
+                azure_ct = cd.get("token")
+
+        try:
+            paged = table_client.query_entities(
+                query_filter=query_filter,
+                results_per_page=request.limit,
+            )
+            page_iter = paged.by_page(continuation_token=azure_ct)
+            try:
+                page = next(iter(page_iter))
+                items = []
+                for ent in page:
+                    ent_dict = dict(ent)
+                    restored = self._restore_overflow_properties(ent_dict)
+                    out = self._unpack_entity(restored)
+                    if "id" not in out and "RowKey" in ent_dict:
+                        out["id"] = ent_dict["RowKey"]
+                    items.append(out)
+                next_azure_ct = page_iter.continuation_token
+            except StopIteration:
+                items = []
+                next_azure_ct = None
+        except Exception as e:
+            raise NoSQLError(f"Azure Table paged query failed: {str(e)}")
+
+        if request.fields:
+            field_set = set(request.fields)
+            items = [{k: v for k, v in item.items() if k in field_set} for item in items]
+
+        next_cursor = None
+        if next_azure_ct:
+            next_cursor = self._encode_cursor({"type": "azure", "token": next_azure_ct})
+
+        return PageResult(items=items, next_cursor=next_cursor, has_more=bool(next_azure_ct))
+
+    # -----------------------------
     # Lifecycle
     # -----------------------------
     def close(self) -> None:
-        """Close cached clients. Safe to call multiple times.
-
-        ─── NEW ─────────────────────────────────────────────────────────────
-        Hook this into PolyDB shutdown so HTTP sessions don't leak on
-        application exit. Caches are cleared so a re-init starts clean.
-        """
         with self._cache_lock:
             for tc in self._table_clients_cache.values():
                 try:

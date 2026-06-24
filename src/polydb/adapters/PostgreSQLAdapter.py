@@ -6,6 +6,7 @@ from typing import Any, Iterator, List, Optional, Tuple, Union
 import hashlib
 from contextlib import contextmanager
 import json
+import base64
 from decimal import Decimal
 from datetime import datetime, date
 
@@ -16,7 +17,7 @@ from psycopg2.extras import Json
 from ..errors import DatabaseError, ConnectionError, InsufficientBalanceError
 from ..retry import retry
 from ..utils import validate_table_name, validate_column_name
-from ..query import QueryBuilder
+from ..query import QueryBuilder, Operator
 from ..types import JsonDict, Lookup
 
 
@@ -129,8 +130,6 @@ class PostgreSQLAdapter:
         try:
             conn = self._pool.getconn()  # type: ignore
 
-            # Only ping if the connection is in an error state (closed/broken),
-            # not on every call. TCP keepalives handle staleness detection.
             if conn.closed:
                 self.logger.warning("Closed connection detected from pool, closing and retrying")
                 self._pool.putconn(conn, close=True)  # type: ignore
@@ -651,6 +650,61 @@ class PostgreSQLAdapter:
                 self._return_connection(conn)
 
     # ---------------------------------------------------------------------
+    # PAGED QUERY (generic PageRequest / PageResult)
+    # ---------------------------------------------------------------------
+
+    @property
+    def capabilities(self):
+        from ..models import BackendCapabilities
+        return BackendCapabilities(
+            server_order=True,
+            server_filter=True,
+            native_cursor=False,
+            supports_count=True,
+        )
+
+    def query_paged(self, table: str, request, tx: Optional[Any] = None):
+        """Server-side ORDER BY + LIMIT/OFFSET with opaque offset cursor."""
+        from ..models import PageResult
+
+        offset = 0
+        if request.cursor:
+            try:
+                cd = json.loads(base64.b64decode(request.cursor.encode()).decode())
+                offset = cd.get("offset", 0)
+            except Exception:
+                offset = 0
+
+        builder = QueryBuilder()
+        for k, v in (request.filters or {}).items():
+            builder.where(k, Operator.EQ, v)
+        if request.order_by:
+            builder.order_by(request.order_by, descending=request.order_desc)
+        builder.skip(offset)
+        builder.take(request.limit + 1)
+        if request.fields:
+            builder.select_fields(request.fields)
+
+        results = self.query_linq(table, builder, tx=tx)
+        if isinstance(results, int):
+            return PageResult(items=[], has_more=False)
+
+        has_more = len(results) > request.limit
+        if has_more:
+            results = results[:request.limit]
+
+        next_cursor = None
+        if has_more:
+            cursor_data = {
+                "offset": offset + request.limit,
+                "order_by": request.order_by,
+                "desc": request.order_desc,
+            }
+            next_cursor = base64.b64encode(json.dumps(cursor_data).encode()).decode()
+
+        return PageResult(items=results, next_cursor=next_cursor, has_more=has_more)
+
+    # ---------------------------------------------------------------------
     # EXECUTE RAW SQL
     # ---------------------------------------------------------------------
 
@@ -673,7 +727,6 @@ class PostgreSQLAdapter:
         cursor = None
         try:
             cursor = conn.cursor()
-            # Log operation shape only, never parameter values
             self.logger.debug("Executing raw SQL (%d params)", len(params or []))
             exec_params = self._serialize_params(params or [])
             self._timed_execute(cursor, sql, exec_params, operation="execute", table="")
@@ -913,7 +966,6 @@ class PostgreSQLAdapter:
 
     # ---------------------------------------------------------------------
     # SAVEPOINTS
-    # Security: use pg_sql.Identifier to prevent SQL injection via savepoint names.
     # ---------------------------------------------------------------------
 
     def begin_savepoint(self, name: str, tx: Any) -> None:

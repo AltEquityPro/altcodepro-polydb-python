@@ -34,6 +34,7 @@ from .audit.manager import AuditManager
 from .audit.context import AuditContext
 from .query import Operator, QueryBuilder
 from .cloudDatabaseFactory import CloudDatabaseFactory
+from .models import PageRequest, PageResult
 import re as _re
 
 logger = logging.getLogger(__name__)
@@ -60,12 +61,7 @@ def _is_unique_violation(exc: BaseException) -> bool:
     return any(m in s for m in _UNIQUE_VIOLATION_MARKERS)
 
 
-def _parse_unique_violation_columns(exc: BaseException) -> list[str]:
-    """
-    Pull the conflicting column names out of a Postgres unique-violation error.
-    Postgres formats them as:  Key (col1, col2)=(val1, val2) already exists.
-    Returns [] if the message doesn't carry that detail.
-    """
+def _parse_unique_violation_columns(exc: BaseException) -> list:
     m = _UNIQUE_KEY_RE.search(str(exc))
     if not m:
         return []
@@ -124,12 +120,6 @@ class _ResolvedAdapters:
 
 
 def _extract_meta(model: Union[type, str]) -> ModelMeta:
-    """
-    Extract storage metadata from model class.
-
-    If model is a string, return a default NoSQL meta (UDL resolves the
-    class before calling PolyDB, so string fallback is safe).
-    """
     if isinstance(model, type):
         raw = getattr(model, "__polydb__", None)
         if raw:
@@ -143,7 +133,6 @@ def _extract_meta(model: Union[type, str]) -> ModelMeta:
                 cache=raw.get("cache", False),
                 cache_ttl=raw.get("cache_ttl"),
             )
-    # Default for dynamic/string models
     return ModelMeta(storage="nosql", table=None, collection=None)
 
 
@@ -237,14 +226,13 @@ class DatabaseFactory:
         self._engine_by_name: Dict[str, EngineConfig] = {e.name: e for e in self._engines}
         self._provider_name = self._engines[0].cloud_factory.provider.value
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # ENGINE ROUTING
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def _resolve_adapters(
         self, model_name: str, storage: str, override: Optional[EngineOverride] = None
     ) -> _ResolvedAdapters:
-        # 1. Per-call override
         if override:
             engine = self._engine_by_name.get(override.engine_name)
             if engine is None:
@@ -255,7 +243,6 @@ class DatabaseFactory:
                 sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
             )
 
-        # 2. Explicit allow-list
         for engine in self._engines:
             if storage == "sql" and engine.sql_models and model_name in engine.sql_models:
                 return _ResolvedAdapters(
@@ -266,7 +253,6 @@ class DatabaseFactory:
                     sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
                 )
 
-        # 3. Default fallback
         for engine in self._engines:
             if storage == "sql" and engine.is_default_sql:
                 return _ResolvedAdapters(
@@ -291,9 +277,9 @@ class DatabaseFactory:
             storage = "sql" if (meta.storage == "sql" and meta.table) else "nosql"
         return self._resolve_adapters(name, storage, override)
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # ENGINE MANAGEMENT
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def register_engine(self, engine: EngineConfig) -> None:
         if engine.name in self._engine_by_name:
@@ -326,9 +312,9 @@ class DatabaseFactory:
                 return e.nosql()
         return self._engines[0].nosql()
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # HELPERS
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def _inject_audit_fields(self, data: JsonDict, is_create: bool = False) -> JsonDict:
         data = dict(data)
@@ -360,9 +346,9 @@ class DatabaseFactory:
             return False
         return meta.storage == "sql" and bool(meta.table)
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # CREATE
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def create(
         self,
@@ -393,13 +379,8 @@ class DatabaseFactory:
                 except Exception as exc:
                     if not _is_unique_violation(exc):
                         raise
-                    # Half-ran scenario / re-activation / replay. The record already
-                    # exists with these unique-key columns. Preserve idempotent
-                    # "create or update" semantics by routing to UPDATE keyed on the
-                    # exact columns that conflicted (parsed from the Postgres error).
                     conflict_cols = _parse_unique_violation_columns(exc)
                     if not conflict_cols or not all(c in data for c in conflict_cols):
-                        # Can't determine the conflict — re-raise so the caller sees it.
                         raise
                     where = {c: data[c] for c in conflict_cols}
                     logger.warning(
@@ -407,8 +388,6 @@ class DatabaseFactory:
                         meta.table,
                         conflict_cols,
                     )
-                    # Drop the conflict columns from the UPDATE SET clause — they're
-                    # already the matching key.
                     update_data = {k: v for k, v in data.items() if k not in conflict_cols}
                     result = adapters.sql.update(meta.table, where, update_data)
             else:
@@ -445,9 +424,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # READ
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def read(
         self,
@@ -493,7 +472,6 @@ class DatabaseFactory:
                     logger.warning("Cache set failed (non-fatal): %s", _ce)
             return raw
 
-        # Check external cache first
         if self._cache and use_external_cache and not no_cache:
             cached = self._cache.get(name, query or {})
             if cached is not None:
@@ -526,9 +504,9 @@ class DatabaseFactory:
         )
         return rows[0] if rows else None
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # UPDATE
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def update(
         self,
@@ -616,9 +594,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # UPSERT
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def upsert(
         self,
@@ -676,9 +654,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # DELETE
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def delete(
         self,
@@ -746,9 +724,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
     # QUERY (LINQ-style)
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
 
     def query_linq(
         self,
@@ -780,9 +758,9 @@ class DatabaseFactory:
                 return result
         return self._run(_op)
 
-    # ──────────────────────────────────────────────────────────────────────
-    # PAGINATION
-    # ──────────────────────────────────────────────────────────────────────
+    # ────────────────────────────────────────────────────────────────────
+    # PAGINATION (legacy simple)
+    # ────────────────────────────────────────────────────────────────────
 
     def read_page(
         self,
@@ -829,9 +807,40 @@ class DatabaseFactory:
                 return result
         return self._run(_op)
 
-    # ══════════════════════════════════════════════════════════════════════
+    # ────────────────────────────────────────────────────────────────────
+    # PAGINATION (generic — order_by, cursor, field projection)
+    # ────────────────────────────────────────────────────────────────────
+
+    def query_paged(
+        self,
+        model: Union[type, str],
+        request: PageRequest,
+        *,
+        engine_override: Optional[EngineOverride] = None,
+    ) -> PageResult:
+        """Unified pagination with order_by, opaque cursor, and field projection.
+
+        Routes to the best backend implementation:
+        - PostgreSQL: server-side ORDER BY + LIMIT/OFFSET
+        - Azure Table (no order_by): native continuation tokens
+        - Azure Table (with order_by) / all other NoSQL: in-memory sort + offset cursor
+        """
+        name = _model_name(model)
+        meta = _extract_meta(model)
+        adapters = self._adapters_for(model, meta, engine_override)
+
+        if self._is_sql(meta, engine_override):
+            return adapters.sql.query_paged(meta.table, request)
+
+        cls = (
+            model if isinstance(model, type)
+            else type(name, (), {"__polydb__": meta.__dict__})
+        )
+        return adapters.nosql.query_paged(cls, request)
+
+    # ═══════════════════════════════════════════════════════════════════════════════
     # BLOB STORAGE
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
 
     def upload_blob(
         self,
@@ -880,9 +889,9 @@ class DatabaseFactory:
         )
         return storage.list(prefix)
 
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
     # QUEUE
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
 
     def send_queue(
         self,
@@ -929,9 +938,9 @@ class DatabaseFactory:
             else queue.delete(message_id, queue_name)
         )
 
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
     # FILE STORAGE
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
 
     def write_file(
         self, path: str, data: Union[bytes, str], *, adapter_name: str = "files"
@@ -951,9 +960,9 @@ class DatabaseFactory:
         files = self._engines[0].cloud_factory.get_files(adapter_name)
         return files.list(directory)
 
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
     # CACHE
-    # ══════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════
 
     def set_cache(self, model: str, key: Any, value: Any, ttl: int = 300) -> None:
         if self._cache:
