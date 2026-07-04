@@ -323,3 +323,38 @@ class MongoConfig(StorageConfig):
         super().__init__(CloudProvider.MONGODB, name)
         self.mongo_uri = mongo_uri
         self.db_name = db_name
+
+
+class CosmosMongoConfig(MongoConfig):
+    """Azure Cosmos DB via the **MongoDB API**.
+
+    Cosmos-for-Mongo speaks the MongoDB wire protocol, so it needs no adapter of
+    its own — it rides the existing ``MongoDBAdapter`` (and thus the whole polydb
+    stack) unchanged. This gives the best of both: Azure-native, serverless /
+    autoscale, managed billing + monitoring **and** portability — the same app
+    runs on MongoDB Atlas by swapping the connection string.
+
+    Pass a full ``connection_string`` (recommended — works for both RU and vCore),
+    or ``account`` + ``key`` to build the standard Cosmos-for-Mongo (RU) URI.
+    """
+
+    def __init__(
+        self,
+        name: str = "cosmos",
+        *,
+        connection_string: str = "",
+        account: str = "",
+        key: str = "",
+        db_name: str = "",
+        port: int = 10255,
+    ):
+        uri = connection_string
+        if not uri and account and key:
+            uri = (
+                f"mongodb://{account}:{key}@{account}.mongo.cosmos.azure.com:{port}/"
+                f"?ssl=true&replicaSet=globaldb&retrywrites=false"
+                f"&maxIdleTimeMS=120000&appName=@{account}@"
+            )
+        super().__init__(name=name, mongo_uri=uri, db_name=db_name)
+        self.is_cosmos = True
+        self.account = account
