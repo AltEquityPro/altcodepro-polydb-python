@@ -567,7 +567,18 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     sval = str(ev).replace("'", "''")
                     parts.append(f"{sk} eq '{sval}'")
 
-            query_filter = " and ".join(parts) if parts else None
+            # Empty-filter contract: if the caller passed filter keys but every
+            # condition dropped out (e.g. all values None/unresolvable), the query
+            # must match NOTHING — return [] (→ None for a single-object read).
+            # Returning all entities here (query_filter=None) is how an unmatched
+            # read_one accidentally returned a stray context row. Only a genuinely
+            # empty filter dict means "list all".
+            if not parts:
+                if eff_filters:
+                    return []
+                query_filter = None
+            else:
+                query_filter = " and ".join(parts)
 
             entities = table_client.query_entities(query_filter=query_filter)
 
@@ -670,6 +681,10 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             else:
                 sval = str(ev).replace("'", "''")
                 parts.append(f"{sk} eq '{sval}'")
+        # Same empty-filter contract as _query_raw: filter keys that all resolved
+        # to no condition must match NOTHING, not list the whole table.
+        if not parts and eff_filters:
+            return PageResult(items=[], next_cursor=None, has_more=False)
         query_filter = " and ".join(parts) if parts else None
 
         azure_ct = None
