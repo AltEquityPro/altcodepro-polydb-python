@@ -3,10 +3,15 @@
 Utility functions for validation and logging
 """
 
+import os
 import re
 import logging
 from typing import Dict, Any
 from .errors import ValidationError
+
+# Loggers already configured by setup_logger(), so per-request adapter
+# construction doesn't reconfigure (and re-clobber) them repeatedly.
+_configured_loggers: set[str] = set()
 
 
 def validate_table_name(table: str) -> str:
@@ -43,19 +48,47 @@ def validate_columns(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def setup_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """Setup logger with consistent format"""
+    """Return a logger, configuring it at most once.
+
+    Adapters are constructed per request, so running the full setup on every
+    call would (a) reset a level the embedding app deliberately set and (b)
+    re-attach a duplicate plain-text handler — which is why "Initialized Azure
+    Queue Storage client" spammed on every request in both plain and JSON form.
+
+    Behaviour:
+    * Idempotent — a given logger name is configured only once.
+    * Host-managed root — when the embedding app owns root logging (it sets the
+      ``ALTCODEPRO_ROOT_LOGGING_MANAGED`` sentinel), polydb attaches NO handler
+      of its own and does NOT force a level. Records propagate to the host's
+      formatter and honour whatever level the host pinned (so the host can
+      quiet noisy adapters). This is the standard "library shouldn't seize
+      logging" contract.
+    * Standalone — with no host managing root, keep the original behaviour:
+      set the level and install a plain StreamHandler.
+    """
     logger = logging.getLogger(name)
-    logger.setLevel(level)
-    
+    if name in _configured_loggers:
+        return logger
+    _configured_loggers.add(name)
+
+    host_managed = bool(os.getenv("ALTCODEPRO_ROOT_LOGGING_MANAGED"))
+    if host_managed:
+        # Let the host own formatting and level; just propagate.
+        return logger
+
+    # Respect a level the caller already pinned explicitly on this logger.
+    if logger.level == logging.NOTSET:
+        logger.setLevel(level)
+
     # Clear existing handlers to avoid duplication in multiprocess scenarios
-    if logger.hasHandlers():
+    if logger.handlers:
         logger.handlers.clear()
-    
+
     handler = logging.StreamHandler()
     formatter = logging.Formatter(
         '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
     )
     handler.setFormatter(formatter)
     logger.addHandler(handler)
-    
+
     return logger
