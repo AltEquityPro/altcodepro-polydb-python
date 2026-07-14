@@ -34,6 +34,22 @@ class NoSQLKVAdapter:
         self._lock = threading.Lock()
         self.max_size = 1024 * 1024  # 1MB
 
+    def _pk_rk_field_names(self, model: type) -> Tuple[str, str]:
+        """
+        The domain field names PK/RK were derived from — the mirror image of
+        _get_pk_rk's field resolution. Adapters use this to translate a
+        physical PartitionKey/RowKey (or pk/sk, whatever the backend calls
+        them) back into the model's own field name before returning a record,
+        instead of leaking storage-internal column names to callers. Falls
+        back to the same defaults _get_pk_rk uses (tenant_id / id) when a
+        model declares no explicit mapping, so unmapped models still round-
+        trip cleanly on upsert without erroring.
+        """
+        meta = getattr(model, "__polydb__", {})
+        pk_field = meta.get("pk_field") or meta.get("partition_key", "tenant_id")
+        rk_field = meta.get("rk_field") or meta.get("sort_key", "id")
+        return pk_field, rk_field
+
     def _get_pk_rk(self, model: type, data: JsonDict) -> Tuple[str, str]:
         """Extract PK/RK from model metadata"""
         meta = getattr(model, "__polydb__", {})

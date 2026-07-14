@@ -255,7 +255,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         return entity
 
-    def _unpack_entity(self, entity: JsonDict) -> JsonDict:
+    def _unpack_entity(self, model: type, entity: JsonDict) -> JsonDict:
         if not entity:
             return {}
 
@@ -263,6 +263,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         raw.pop("etag", None)
         raw.pop("ETag", None)
         raw.pop("Timestamp", None)
+        # Internal: which model a row belongs to, used only to isolate models
+        # sharing a table. Never part of the public record shape.
+        raw.pop(_MODEL_FIELD, None)
 
         keymap_str = raw.pop("__keymap__", None)
         keymap: Dict[str, str] = {}
@@ -272,26 +275,30 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             except Exception:
                 keymap = {}
 
+        pk = raw.pop("PartitionKey", None)
+        rk = raw.pop("RowKey", None)
+
         out: JsonDict = {}
-
-        pk = raw.get("PartitionKey")
-        rk = raw.get("RowKey")
-        if pk is not None:
-            out["PartitionKey"] = pk
-        if rk is not None:
-            out["RowKey"] = rk
-
         for k, v in raw.items():
-            if k in ("PartitionKey", "RowKey"):
-                continue
-
-            if k.startswith("_") or k in (_MODEL_FIELD,):
+            if k.startswith("_"):
                 out[k] = v
                 continue
 
             orig_key = keymap.get(k, k)
             out[orig_key] = self._decode_value(v)
 
+        # PartitionKey/RowKey are Azure Table Storage's own physical column
+        # names — never return them as-is. Map each back to the domain field
+        # it was derived from (model's declared partition_key/sort_key, same
+        # resolution _get_pk_rk used to write them), so the same field name
+        # round-trips on read as it did on write. Guarded so we never clobber
+        # a real property that already carries the value (the common case —
+        # pk/rk fields are usually also stored as regular properties).
+        pk_field, rk_field = self._pk_rk_field_names(model)
+        if pk is not None and pk_field not in out:
+            out[pk_field] = pk
+        if rk is not None and rk_field not in out:
+            out[rk_field] = rk
         if "id" not in out and rk is not None:
             out["id"] = rk
 
@@ -491,7 +498,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             table_client.upsert_entity(reference_entity)
 
-            restored = self._unpack_entity(entity)
+            restored = self._unpack_entity(model, entity)
             restored["id"] = safe_rk
 
             return restored
@@ -517,7 +524,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             restored_entity = self._restore_overflow_properties(entity_dict)
 
-            out = self._unpack_entity(restored_entity)
+            out = self._unpack_entity(model, restored_entity)
             if "id" not in out:
                 out["id"] = safe_rk
 
@@ -589,7 +596,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                 restored_entity = self._restore_overflow_properties(ent_dict)
 
-                out = self._unpack_entity(restored_entity)
+                out = self._unpack_entity(model, restored_entity)
 
                 if "id" not in out and "RowKey" in ent_dict:
                     out["id"] = ent_dict["RowKey"]
@@ -705,7 +712,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 for ent in page:
                     ent_dict = dict(ent)
                     restored = self._restore_overflow_properties(ent_dict)
-                    out = self._unpack_entity(restored)
+                    out = self._unpack_entity(model, restored)
                     if "id" not in out and "RowKey" in ent_dict:
                         out["id"] = ent_dict["RowKey"]
                     items.append(out)
