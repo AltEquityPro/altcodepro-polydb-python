@@ -543,14 +543,32 @@ class DatabaseFactory:
             if self._is_sql(meta, engine_override):
                 result = adapters.sql.update(meta.table, entity_id, data)
             else:
+                # A scalar entity_id is usually the record's "id" property,
+                # not its physical PartitionKey/RowKey — those come from the
+                # model's declared pk_field/rk_field (x-metadata partition_key
+                # /sort_key), which for most schema models is a different
+                # field entirely (e.g. Artifact: pk=project_slug, rk=
+                # template_key). Recover both from the patch payload, or —
+                # more reliably — from the record loaded just above as
+                # `before`, so a plain id-addressed update() still lands on
+                # the entity's real physical key instead of a mismatched
+                # default partition / the id used as a row key it never had.
                 pkey = data.get("PartitionKey") or data.get("partition_key") or data.get("pk")
-                en_id = entity_id
+                if not pkey and meta.pk_field:
+                    pkey = data.get(meta.pk_field)
                 if not pkey and before:
                     pkey = (
                         before.get("PartitionKey")
                         or before.get("partition_key")
                         or before.get("pk")
+                        or (before.get(meta.pk_field) if meta.pk_field else None)
                     )
+                rkey = None
+                if meta.rk_field and meta.rk_field != "id":
+                    rkey = data.get(meta.rk_field) or (
+                        before.get(meta.rk_field) if before else None
+                    )
+                en_id = entity_id
                 if pkey:
                     if isinstance(en_id, dict):
                         en_pk = (
@@ -560,8 +578,16 @@ class DatabaseFactory:
                         )
                         if not en_pk:
                             en_id["partition_key"] = pkey
+                        en_rk = (
+                            en_id.get("RowKey")
+                            or en_id.get("row_key")
+                            or en_id.get("rk")
+                            or en_id.get("id")
+                        )
+                        if not en_rk and rkey:
+                            en_id["row_key"] = rkey
                     elif isinstance(en_id, str):
-                        en_id = {"partition_key": pkey, "id": entity_id}
+                        en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
 
                 cls = (
                     model
@@ -702,7 +728,23 @@ class DatabaseFactory:
                     if isinstance(model, type)
                     else type(name, (), {"__polydb__": meta.__dict__})
                 )
-                result = adapters.nosql.delete(cls, entity_id, etag=etag)
+                # Same physical-key recovery as update() (see there for why a
+                # scalar entity_id alone isn't enough once a model's pk_field
+                # /rk_field differ from "id").
+                en_id = entity_id
+                if not isinstance(en_id, dict) and before:
+                    pkey = (
+                        before.get("PartitionKey")
+                        or before.get("partition_key")
+                        or before.get("pk")
+                        or (before.get(meta.pk_field) if meta.pk_field else None)
+                    )
+                    if pkey:
+                        rkey = None
+                        if meta.rk_field and meta.rk_field != "id":
+                            rkey = before.get(meta.rk_field)
+                        en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
+                result = adapters.nosql.delete(cls, en_id, etag=etag)
             success = True
             if self._enable_cache and self._cache:
                 try:
