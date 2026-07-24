@@ -75,6 +75,23 @@ class TestReceiveReturnsReceiptHandle:
         assert "receipt_handle" in received
         assert received["receipt_handle"]  # truthy -- WorkerPool checks `if receipt_handle`
 
+    def test_receive_surfaces_dequeue_count(self):
+        """WorkerPool's poison-message guard thresholds on this to
+        dead-letter a message the queue keeps redelivering."""
+        adapter = _make_adapter()
+        client = _mock_queue_client(adapter)
+
+        raw_msg = MagicMock()
+        raw_msg.id = "msg-123"
+        raw_msg.pop_receipt = "pop-abc"
+        raw_msg.content = json.dumps({"hello": "world"})
+        raw_msg.dequeue_count = 7
+        client.receive_messages.return_value = [raw_msg]
+
+        [received] = adapter.receive(queue_name="default", max_messages=1)
+
+        assert received["dequeue_count"] == 7
+
     def test_receipt_handle_round_trips_through_decode(self):
         message_id, pop_receipt = AzureQueueAdapter._decode_receipt(
             AzureQueueAdapter._encode_receipt("msg-123", "pop-abc")

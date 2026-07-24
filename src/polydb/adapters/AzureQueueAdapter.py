@@ -135,6 +135,12 @@ class AzureQueueAdapter(QueueAdapter):
                         # Azure's visibility timeout elapses — replaying the
                         # same task forever even after it already ran.
                         "receipt_handle": self._encode_receipt(msg.id, msg.pop_receipt),
+                        # How many times Azure has handed this same message
+                        # out (1 on first delivery). Lets a consumer (e.g.
+                        # WorkerPool) detect a poison message that keeps
+                        # failing to ack/process and dead-letter it instead
+                        # of retrying forever.
+                        "dequeue_count": msg.dequeue_count,
                         "body": payload,
                     }
                 )
