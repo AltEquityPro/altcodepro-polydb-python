@@ -110,15 +110,38 @@ class AzureQueueAdapter(QueueAdapter):
         except Exception as e:
             raise QueueError(f"Azure Queue send failed: {e}")
 
+    # How long a delivered message stays invisible to other consumers before
+    # Azure hands it out again. The SDK's own default is 30s — far shorter
+    # than a real task (an LLM generation call alone can run 30-120s+), so
+    # a still-in-flight message was becoming visible again and getting
+    # picked up by a second worker mid-processing: two concurrent
+    # executions of the same task, one of which stomps/duplicates the
+    # other's result. 300s covers realistic worst-case processing; ack()
+    # deletes the message immediately on completion regardless; a genuinely
+    # crashed worker still recovers the message after this timeout.
+    DEFAULT_VISIBILITY_TIMEOUT = 300
+
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
-    def receive(self, queue_name: str = "default", max_messages: int = 1) -> List[Dict[str, Any]]:
+    def receive(
+        self,
+        queue_name: str = "default",
+        max_messages: int = 1,
+        visibility_timeout: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
         """Receive messages"""
         try:
 
             queue_name = self._normalize_queue_name(queue_name)
             queue_client = self._get_queue(queue_name)
 
-            messages = queue_client.receive_messages(max_messages=max_messages)
+            messages = queue_client.receive_messages(
+                max_messages=max_messages,
+                visibility_timeout=(
+                    visibility_timeout
+                    if visibility_timeout is not None
+                    else self.DEFAULT_VISIBILITY_TIMEOUT
+                ),
+            )
 
             results = []
 
