@@ -46,6 +46,20 @@ class AzureQueueAdapter(QueueAdapter):
         name = re.sub(r"-+", "-", name)  # collapse multiple dashes
         return name.strip("-")
 
+    @staticmethod
+    def _encode_receipt(message_id: str, pop_receipt: str) -> str:
+        # Azure needs BOTH message_id and pop_receipt to delete/update a
+        # message, but the generic queue contract (WorkerPool, SQSAdapter)
+        # only ever carries a single opaque `receipt_handle` string end to
+        # end. Pack both into one string here so ack()/nack() can recover
+        # them without any caller needing to know Azure's two-part scheme.
+        return f"{message_id}|{pop_receipt}"
+
+    @staticmethod
+    def _decode_receipt(receipt_handle: str) -> "tuple[str, str]":
+        message_id, _, pop_receipt = (receipt_handle or "").partition("|")
+        return message_id, pop_receipt
+
     def _initialize_client(self) -> None:
         """Initialize Azure Queue client"""
         from azure.storage.queue import QueueServiceClient
@@ -114,6 +128,13 @@ class AzureQueueAdapter(QueueAdapter):
                     {
                         "id": msg.id,
                         "pop_receipt": msg.pop_receipt,
+                        # WorkerPool (and the generic UDL queue contract)
+                        # reads this key to ack/nack. Without it, ack() is
+                        # always skipped (falsy receipt_handle), the message
+                        # is never deleted, and it silently reappears once
+                        # Azure's visibility timeout elapses — replaying the
+                        # same task forever even after it already ran.
+                        "receipt_handle": self._encode_receipt(msg.id, msg.pop_receipt),
                         "body": payload,
                     }
                 )
@@ -156,8 +177,14 @@ class AzureQueueAdapter(QueueAdapter):
         Preferred usage:
             ack(pop_receipt=..., message_id=...)
 
-        If message_id is not provided, this will fail safely.
+        Generic callers (WorkerPool, storage_router.queue_ack) only pass a
+        single `receipt_handle` positionally and never supply message_id —
+        in that case `pop_receipt` here is actually the combined value
+        produced by `receive()` (`"<message_id>|<pop_receipt>"`), so decode
+        it rather than failing.
         """
+        if not message_id:
+            message_id, pop_receipt = self._decode_receipt(pop_receipt)
         if not message_id:
             raise QueueError("AzureQueueAdapter.ack requires message_id")
         queue_name = self._normalize_queue_name(queue_name)
@@ -166,3 +193,34 @@ class AzureQueueAdapter(QueueAdapter):
             queue_name=queue_name,
             pop_receipt=pop_receipt,
         )
+
+    def nack(
+        self,
+        queue_name: str,
+        ack_id: str,
+        *,
+        delay: Optional[int] = None,
+    ) -> bool:
+        """
+        Make a message visible again (optionally after `delay` seconds)
+        without deleting it, instead of leaving it to reappear only once
+        Azure's default visibility timeout elapses.
+
+        `ack_id` is the combined `"<message_id>|<pop_receipt>"` receipt
+        handle produced by `receive()`. Matches the positional order used
+        by storage_router.queue_nack: nack(queue_name, ack_id, delay=...).
+        """
+        message_id, pop_receipt = self._decode_receipt(ack_id)
+        if not message_id:
+            raise QueueError("AzureQueueAdapter.nack requires a receipt_handle from receive()")
+        try:
+            queue_name = self._normalize_queue_name(queue_name)
+            queue_client = self._get_queue(queue_name)
+            queue_client.update_message(
+                message_id,
+                pop_receipt=pop_receipt,
+                visibility_timeout=delay or 0,
+            )
+            return True
+        except Exception as e:
+            raise QueueError(f"Azure Queue nack failed: {e}")

@@ -109,8 +109,8 @@ class EngineOverride:
 
 @dataclass
 class _ResolvedAdapters:
-    sql: PostgreSQLAdapter
-    nosql: NoSQLKVAdapter
+    sql: Optional[PostgreSQLAdapter]
+    nosql: Optional[NoSQLKVAdapter]
     engine_name: str
 
 
@@ -233,35 +233,38 @@ class DatabaseFactory:
     def _resolve_adapters(
         self, model_name: str, storage: str, override: Optional[EngineOverride] = None
     ) -> _ResolvedAdapters:
+        # Only construct the adapter this call actually needs. Every caller
+        # (create/read/update/upsert/delete/query*) branches on `storage` and
+        # touches exactly one of .sql/.nosql — building both unconditionally
+        # meant a purely-SQL deployment with no reachable NoSQL backend (or
+        # vice versa) failed on every single call, not just ones that needed
+        # the missing engine.
+        def _build(engine: "EngineConfig") -> _ResolvedAdapters:
+            return _ResolvedAdapters(
+                sql=engine.sql() if storage == "sql" else None,
+                nosql=engine.nosql() if storage == "nosql" else None,
+                engine_name=engine.name,
+            )
+
         if override:
             engine = self._engine_by_name.get(override.engine_name)
             if engine is None:
                 raise AdapterConfigurationError(
                     f"Unknown engine '{override.engine_name}'. Available: {list(self._engine_by_name)}"
                 )
-            return _ResolvedAdapters(
-                sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
-            )
+            return _build(engine)
 
         for engine in self._engines:
             if storage == "sql" and engine.sql_models and model_name in engine.sql_models:
-                return _ResolvedAdapters(
-                    sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
-                )
+                return _build(engine)
             if storage == "nosql" and engine.nosql_models and model_name in engine.nosql_models:
-                return _ResolvedAdapters(
-                    sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
-                )
+                return _build(engine)
 
         for engine in self._engines:
             if storage == "sql" and engine.is_default_sql:
-                return _ResolvedAdapters(
-                    sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
-                )
+                return _build(engine)
             if storage == "nosql" and engine.is_default_nosql:
-                return _ResolvedAdapters(
-                    sql=engine.sql(), nosql=engine.nosql(), engine_name=engine.name
-                )
+                return _build(engine)
 
         raise AdapterConfigurationError(f"No engine for model='{model_name}' storage='{storage}'")
 
