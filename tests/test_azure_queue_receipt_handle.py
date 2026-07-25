@@ -75,12 +75,56 @@ class TestReceiveReturnsReceiptHandle:
         assert "receipt_handle" in received
         assert received["receipt_handle"]  # truthy -- WorkerPool checks `if receipt_handle`
 
+    def test_receive_surfaces_dequeue_count(self):
+        """WorkerPool's poison-message guard thresholds on this to
+        dead-letter a message the queue keeps redelivering."""
+        adapter = _make_adapter()
+        client = _mock_queue_client(adapter)
+
+        raw_msg = MagicMock()
+        raw_msg.id = "msg-123"
+        raw_msg.pop_receipt = "pop-abc"
+        raw_msg.content = json.dumps({"hello": "world"})
+        raw_msg.dequeue_count = 7
+        client.receive_messages.return_value = [raw_msg]
+
+        [received] = adapter.receive(queue_name="default", max_messages=1)
+
+        assert received["dequeue_count"] == 7
+
     def test_receipt_handle_round_trips_through_decode(self):
         message_id, pop_receipt = AzureQueueAdapter._decode_receipt(
             AzureQueueAdapter._encode_receipt("msg-123", "pop-abc")
         )
         assert message_id == "msg-123"
         assert pop_receipt == "pop-abc"
+
+    def test_receive_defaults_to_a_long_visibility_timeout(self):
+        """The Azure SDK's own default (30s) is shorter than a real task
+        can take (an LLM call alone can run 30-120s+), so a still-in-flight
+        message became visible again and got picked up by a second worker
+        mid-processing -- two concurrent executions of the same task. This
+        guards against that default silently regressing back to 30s (or
+        being dropped entirely, which is the SDK's fallback)."""
+        adapter = _make_adapter()
+        client = _mock_queue_client(adapter)
+        client.receive_messages.return_value = []
+
+        adapter.receive(queue_name="default", max_messages=1)
+
+        _, kwargs = client.receive_messages.call_args
+        assert kwargs["visibility_timeout"] == AzureQueueAdapter.DEFAULT_VISIBILITY_TIMEOUT
+        assert kwargs["visibility_timeout"] >= 300
+
+    def test_receive_honours_an_explicit_visibility_timeout(self):
+        adapter = _make_adapter()
+        client = _mock_queue_client(adapter)
+        client.receive_messages.return_value = []
+
+        adapter.receive(queue_name="default", max_messages=1, visibility_timeout=45)
+
+        _, kwargs = client.receive_messages.call_args
+        assert kwargs["visibility_timeout"] == 45
 
 
 class TestAckAcceptsSingleReceiptHandle:
