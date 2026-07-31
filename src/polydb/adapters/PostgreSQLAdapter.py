@@ -87,6 +87,26 @@ class PostgreSQLAdapter:
                 query.setdefault("keepalives_idle", ["30"])
                 query.setdefault("keepalives_interval", ["10"])
                 query.setdefault("keepalives_count", ["5"])
+                # connect_timeout only bounds the initial handshake; keepalives
+                # only detect a dead *idle* connection. Neither bounds a query
+                # that's already in flight and stalls mid-response (packet
+                # loss / a silently-dropped connection somewhere on the path
+                # to a remote DB) -- that shows up as libpq's own "could not
+                # receive data from server: Operation timed out / SSL SYSCALL
+                # error", and without a bound the client can block on that
+                # recv() for a very long time (Python can't interrupt a
+                # blocking C-level syscall, so even Ctrl+C doesn't land until
+                # it returns). tcp_user_timeout bounds unacknowledged data at
+                # the OS/TCP level; statement_timeout bounds how long Postgres
+                # itself will run a query before cancelling it server-side.
+                query.setdefault(
+                    "tcp_user_timeout",
+                    [os.getenv("POSTGRES_TCP_USER_TIMEOUT_MS", "20000")],
+                )
+                query.setdefault(
+                    "options",
+                    [f"-c statement_timeout={os.getenv('POSTGRES_STATEMENT_TIMEOUT_MS', '20000')}"],
+                )
 
                 new_query = urlencode(query, doseq=True)
                 parsed = parsed._replace(query=new_query)
