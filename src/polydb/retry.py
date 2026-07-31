@@ -3,6 +3,7 @@
 Retry logic with exponential backoff and metrics hooks
 """
 
+import os
 import time
 import logging
 from functools import wraps
@@ -74,7 +75,15 @@ def retry(
         @wraps(func)
         def wrapper(*args, **kwargs):
             attempt = 0
-            current_delay = delay
+            # POLYDB_RETRY_DELAY_SECONDS / POLYDB_RETRY_BACKOFF override every
+            # call site's hardcoded delay/backoff without touching them
+            # individually -- every adapter passes delay=1.0 explicitly, so a
+            # transient failure against a high-latency remote DB (e.g. a local
+            # dev box talking to a managed Postgres in a different region)
+            # costs a full 1s+2s of sleep on top of the already-elevated
+            # network round trip, per retry. Unset, behavior is unchanged.
+            current_delay = float(os.getenv("POLYDB_RETRY_DELAY_SECONDS", delay))
+            backoff_rate = float(os.getenv("POLYDB_RETRY_BACKOFF", backoff))
 
             logger = logging.getLogger(__name__)
 
@@ -110,7 +119,7 @@ def retry(
                         f"Retrying in {current_delay}s..."
                     )
                     time.sleep(current_delay)
-                    current_delay *= backoff
+                    current_delay *= backoff_rate
             raise RuntimeError(
                 f"{func.__name__} exhausted {max_attempts} attempts without returning"
             )
