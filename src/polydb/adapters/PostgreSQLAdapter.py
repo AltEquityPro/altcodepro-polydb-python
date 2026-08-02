@@ -76,7 +76,7 @@ class PostgreSQLAdapter:
     def _initialize_pool(self):
         try:
             import psycopg2.pool
-            from urllib.parse import urlparse, parse_qs, urlencode, urlunparse
+            from urllib.parse import urlparse, parse_qs, quote, urlencode, urlunparse
 
             dsn = self.connection_string
             if "postgresql://" in dsn:
@@ -108,7 +108,12 @@ class PostgreSQLAdapter:
                     [f"-c statement_timeout={os.getenv('POSTGRES_STATEMENT_TIMEOUT_MS', '20000')}"],
                 )
 
-                new_query = urlencode(query, doseq=True)
+                # quote_via=quote, not the default quote_plus: libpq's URI
+                # parser percent-decodes query values but treats "+" as a
+                # literal plus, so form-encoding the space in
+                # "-c statement_timeout=..." makes the server see the option
+                # name as "+statement_timeout" and reject the connection.
+                new_query = urlencode(query, doseq=True, quote_via=quote)
                 parsed = parsed._replace(query=new_query)
                 dsn = urlunparse(parsed)
 
