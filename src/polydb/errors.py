@@ -86,3 +86,9 @@ class InsufficientBalanceError(PolyDBError):
     """Raised when an atomic decrement is attempted but the balance is insufficient."""
 
     pass
+
+
+class EncryptionConfigError(PolyDBError):
+    """Raised when field encryption is requested but no usable key is configured."""
+
+    pass
