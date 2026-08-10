@@ -14,6 +14,25 @@ from ..types import JsonDict
 from ..models import PartitionConfig
 
 
+def _as_literal(value: Any) -> Any:
+    """Wrap a dict value so Mongo compares it instead of executing it.
+
+    A bare dict on the right-hand side of a field is an *operator expression*
+    to Mongo, so a filter value that came from request input can turn
+    ``{"password": <value>}`` into ``{"password": {"$gt": ""}}`` - a match on
+    every document, i.e. filter/auth bypass and full-collection extraction.
+    ``{"$eq": {...}}`` is exactly the same comparison Mongo performs for a
+    literal subdocument, so legitimate exact-match-on-subdocument queries keep
+    working while ``$``-operators can no longer be smuggled in through a value.
+    """
+    return {"$eq": value} if isinstance(value, dict) else value
+
+
+def _sanitize_query(query: Dict[str, Any]) -> Dict[str, Any]:
+    """Apply _as_literal to every value of a caller-supplied Mongo query."""
+    return {k: _as_literal(v) for k, v in (query or {}).items()}
+
+
 class MongoDBAdapter(NoSQLKVAdapter):
     """MongoDB adapter compatible with PolyDB contract"""
 
@@ -140,7 +159,9 @@ class MongoDBAdapter(NoSQLKVAdapter):
         try:
             collection = self._get_collection(model)
 
-            query = query or {}
+            # Sanitize before adding our own operator clause below, so the
+            # pagination cursor isn't stripped along with injected operators.
+            query = _sanitize_query(query)
 
             if continuation_token:
                 query["_pk"] = {"$gt": continuation_token}
@@ -179,7 +200,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
             for k, v in (filters or {}).items():
 
                 if k == "id":
-                    query["_pk"] = v
+                    query["_pk"] = _as_literal(v)
                     continue
 
                 if k.endswith("__gt"):
@@ -195,7 +216,10 @@ class MongoDBAdapter(NoSQLKVAdapter):
                     query[k[:-5]] = {"$lte": v}
 
                 elif k.endswith("__in"):
-                    query[k[:-4]] = {"$in": v}
+                    # $in operands are matched literally by Mongo, but the list
+                    # itself has to be a list - a dict here would be read as an
+                    # operator document.
+                    query[k[:-4]] = {"$in": list(v) if isinstance(v, (list, tuple, set)) else [v]}
 
                 elif k.endswith("__contains"):
                     safe_pattern = re.escape(str(v))
@@ -205,7 +229,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
                     }
 
                 else:
-                    query[k] = v
+                    query[k] = _as_literal(v)
 
             cursor = collection.find(query)
 

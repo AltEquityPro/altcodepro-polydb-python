@@ -5,6 +5,45 @@ Advanced query capabilities: JOIN, subqueries, aggregates
 from typing import List, Optional, Any, Dict
 from dataclasses import dataclass, field
 from enum import Enum
+import re
+
+from .errors import ValidationError
+from .utils import validate_table_name, validate_column_name
+
+# table.column / alias.column - each half validated with the same allowlists
+# used elsewhere for identifiers, joined by a single literal dot.
+_QUALIFIED_COLUMN_RE = re.compile(r"^[a-zA-Z0-9_-]+\.[a-zA-Z0-9_]+$")
+
+
+def _validate_qualified_column(value: str) -> str:
+    """Validate a column reference that may be table/alias-qualified (a.b) or bare (b)."""
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"Invalid column reference: {value!r}")
+    if _QUALIFIED_COLUMN_RE.match(value):
+        return value
+    return validate_column_name(value)
+
+
+# Safe HAVING grammar: one or more `FUNC(col) OP operand` comparisons joined by
+# AND/OR. No string literals, no semicolons/comments, no subqueries - this is
+# an allowlist, not a sanitizer, so anything outside this shape is rejected.
+_IDENT = r"[A-Za-z_][A-Za-z0-9_]*"
+_QUALIFIED = rf"{_IDENT}(?:\.{_IDENT})?"
+_FUNC_CALL = rf"{_IDENT}\(\s*(?:\*|{_QUALIFIED})\s*\)"
+_OPERAND = rf"(?:{_FUNC_CALL}|{_QUALIFIED}|-?\d+(?:\.\d+)?)"
+_COMPARISON_OP = r"(?:!=|<>|>=|<=|=|<|>)"
+_CONDITION = rf"{_OPERAND}\s*{_COMPARISON_OP}\s*{_OPERAND}"
+_HAVING_RE = re.compile(rf"^{_CONDITION}(?:\s+(?:AND|OR)\s+{_CONDITION})*$", re.IGNORECASE)
+
+
+def _validate_having_condition(condition: str) -> str:
+    if not isinstance(condition, str) or not _HAVING_RE.match(condition.strip()):
+        raise ValidationError(
+            f"Invalid HAVING condition: {condition!r}. Only simple aggregate "
+            'comparisons such as "COUNT(id) > 5" (optionally chained with AND/OR) '
+            "are allowed - no string literals, subqueries, or statement separators."
+        )
+    return condition
 
 
 class JoinType(Enum):
@@ -49,6 +88,13 @@ class AdvancedQueryBuilder:
     having_conditions: List[str] = field(default_factory=list)
     subqueries: Dict[str, "AdvancedQueryBuilder"] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        validate_table_name(self.table)
+        for gf in self.group_by_fields:
+            _validate_qualified_column(gf)
+        for cond in self.having_conditions:
+            _validate_having_condition(cond)
+
     def join(
         self,
         table: str,
@@ -58,6 +104,11 @@ class AdvancedQueryBuilder:
         alias: Optional[str] = None,
     ) -> "AdvancedQueryBuilder":
         """Add JOIN clause"""
+        validate_table_name(table)
+        _validate_qualified_column(on_left)
+        _validate_qualified_column(on_right)
+        if alias is not None:
+            validate_column_name(alias)
         self.joins.append(
             Join(table=table, join_type=join_type, on_left=on_left, on_right=on_right, alias=alias)
         )
@@ -67,16 +118,27 @@ class AdvancedQueryBuilder:
         self, function: AggregateFunction, field: str, alias: str
     ) -> "AdvancedQueryBuilder":
         """Add aggregate function"""
+        if field != "*":
+            _validate_qualified_column(field)
+        validate_column_name(alias)
         self.aggregates.append(Aggregate(function=function, field=field, alias=alias))
         return self
 
     def group_by(self, *fields: str) -> "AdvancedQueryBuilder":
         """Add GROUP BY"""
+        for f in fields:
+            _validate_qualified_column(f)
         self.group_by_fields.extend(fields)
         return self
 
     def having(self, condition: str) -> "AdvancedQueryBuilder":
-        """Add HAVING clause"""
+        """Add HAVING clause.
+
+        `condition` must match the safe aggregate-comparison grammar enforced
+        by `_validate_having_condition` (e.g. "COUNT(id) > 5") - free-form SQL
+        text is rejected to prevent HAVING-clause injection.
+        """
+        _validate_having_condition(condition)
         self.having_conditions.append(condition)
         return self
 

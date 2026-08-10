@@ -13,8 +13,11 @@ from functools import wraps
 import logging
 
 from .json_safe import json_safe
+from .errors import EncryptionConfigError
 
 logger = logging.getLogger(__name__)
+
+DEFAULT_KEY_ID = "v1"
 
 
 @dataclass
@@ -27,60 +30,138 @@ class EncryptionConfig:
 
 
 class FieldEncryption:
-    """Field-level encryption for sensitive data"""
+    """Field-level encryption for sensitive data (AES-256-GCM).
+
+    Keys are loaded from the environment - never generated in memory - so a
+    process restart can never silently orphan previously-encrypted data:
+
+    - ``POLYDB_ENCRYPTION_KEY``: base64-encoded 32-byte key used to encrypt
+      new values. Its key id is ``POLYDB_ENCRYPTION_KEY_ID`` (default "v1").
+    - ``POLYDB_ENCRYPTION_KEYS``: optional JSON object ``{key_id: base64key}``
+      of retired keys kept around only to decrypt values written before a
+      rotation; not used for new encryption.
+
+    Constructing this class raises :class:`EncryptionConfigError` if no
+    active key is configured - callers only instantiate it when encryption
+    is explicitly enabled, so failing fast here means a misconfigured
+    deployment refuses to start rather than persisting plaintext.
+    """
 
     def __init__(self, encryption_key: Optional[bytes] = None):
-        self.encryption_key = encryption_key or self._generate_key()
+        if encryption_key is not None:
+            self._keys: Dict[str, bytes] = {DEFAULT_KEY_ID: encryption_key}
+            self._active_key_id = DEFAULT_KEY_ID
+        else:
+            self._keys = self._load_keys()
+            self._active_key_id = os.getenv("POLYDB_ENCRYPTION_KEY_ID", DEFAULT_KEY_ID).strip()
+            if self._active_key_id not in self._keys:
+                raise EncryptionConfigError(
+                    f"POLYDB_ENCRYPTION_KEY_ID={self._active_key_id!r} has no matching key. "
+                    "Set POLYDB_ENCRYPTION_KEY (for the active key id) or include it in "
+                    "POLYDB_ENCRYPTION_KEYS."
+                )
+
+    @property
+    def encryption_key(self) -> bytes:
+        """The active key's raw bytes (kept for backward-compatible access)."""
+        return self._keys[self._active_key_id]
 
     @staticmethod
-    def _generate_key() -> bytes:
-        """Generate encryption key from environment or create new"""
-        key_str = os.getenv("POLYDB_ENCRYPTION_KEY")
-        if key_str:
-            return base64.b64decode(key_str)
-
-        # Generate new key (should be saved securely)
-        key = os.urandom(32)
-        # For production, log or store this key securely; here we just warn
-        logger.warning(
-            "Generated new encryption key. Store it securely in POLYDB_ENCRYPTION_KEY env var."
-        )
+    def _decode_key(raw: str, source: str) -> bytes:
+        try:
+            key = base64.b64decode(raw, validate=True)
+        except Exception as exc:
+            raise EncryptionConfigError(f"{source} is not valid base64: {exc}") from exc
+        if len(key) != 32:
+            raise EncryptionConfigError(
+                f"{source} decodes to {len(key)} bytes; AES-256-GCM requires exactly 32 bytes."
+            )
         return key
+
+    @classmethod
+    def _load_keys(cls) -> Dict[str, bytes]:
+        """Load the active key plus any retired keys from the environment."""
+        keys: Dict[str, bytes] = {}
+
+        retired_raw = os.getenv("POLYDB_ENCRYPTION_KEYS")
+        if retired_raw:
+            try:
+                retired = json.loads(retired_raw)
+            except json.JSONDecodeError as exc:
+                raise EncryptionConfigError(
+                    f"POLYDB_ENCRYPTION_KEYS is not valid JSON: {exc}"
+                ) from exc
+            for key_id, raw in retired.items():
+                keys[key_id] = cls._decode_key(raw, f"POLYDB_ENCRYPTION_KEYS[{key_id!r}]")
+
+        active_raw = os.getenv("POLYDB_ENCRYPTION_KEY")
+        if not active_raw:
+            raise EncryptionConfigError(
+                "Field encryption is enabled but POLYDB_ENCRYPTION_KEY is not set. "
+                "Generate one with: python -c \"import os,base64; "
+                "print(base64.b64encode(os.urandom(32)).decode())\" and store it securely "
+                "(e.g. Azure Key Vault / AWS Secrets Manager / GCP Secret Manager) - do not "
+                "commit it or let it be generated on the fly."
+            )
+        active_key_id = os.getenv("POLYDB_ENCRYPTION_KEY_ID", DEFAULT_KEY_ID).strip()
+        keys[active_key_id] = cls._decode_key(active_raw, "POLYDB_ENCRYPTION_KEY")
+        return keys
 
     def _encrypt_value(self, value: Any) -> str:
         """Encrypt arbitrary value (serialize if non-str)"""
         if value is None:
             return ""
         data = json.dumps(value, default=json_safe) if not isinstance(value, str) else value
+
         try:
             from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+        except ImportError as exc:
+            raise ImportError(
+                "cryptography not installed. Install with: pip install 'altcodepro-polydb-python[security]'"
+            ) from exc
 
-            aesgcm = AESGCM(self.encryption_key)
-            nonce = os.urandom(12)
+        aesgcm = AESGCM(self._keys[self._active_key_id])
+        nonce = os.urandom(12)
 
-            ciphertext = aesgcm.encrypt(nonce, data.encode("utf-8"), None)
+        ciphertext = aesgcm.encrypt(nonce, data.encode("utf-8"), None)
 
-            # Combine nonce and ciphertext
-            encrypted = base64.b64encode(nonce + ciphertext).decode("utf-8")
-            return f"encrypted:{encrypted}"
-        except ImportError:
-            raise ImportError("cryptography not installed. Install with: pip install cryptography")
+        # Combine nonce and ciphertext; tag the payload with the key id used so a
+        # future key rotation can still decrypt values written under an older key.
+        encrypted = base64.b64encode(nonce + ciphertext).decode("utf-8")
+        return f"encrypted:{self._active_key_id}:{encrypted}"
 
     def _decrypt_value(self, encrypted_data: Any) -> Any:
         """Decrypt field data (deserialize if needed)"""
         if not isinstance(encrypted_data, str) or not encrypted_data.startswith("encrypted:"):
             return encrypted_data
 
+        payload = encrypted_data[len("encrypted:"):]
+        # Legacy format (pre key-versioning) has no key id segment - decrypt
+        # with the active key for backward compatibility with existing data.
+        key_id, _, b64_blob = payload.partition(":")
+        if not b64_blob:
+            key_id, b64_blob = self._active_key_id, key_id
+
+        key = self._keys.get(key_id)
+        if key is None:
+            raise EncryptionConfigError(
+                f"No encryption key available for key id {key_id!r}. Add it to "
+                "POLYDB_ENCRYPTION_KEYS to decrypt values written before a key rotation."
+            )
+
         try:
-            from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            try:
+                from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+            except ImportError as exc:
+                raise ImportError(
+                    "cryptography not installed. Install with: pip install 'altcodepro-polydb-python[security]'"
+                ) from exc
 
-            encrypted_data = encrypted_data[10:]  # Remove prefix
-            combined = base64.b64decode(encrypted_data)
-
+            combined = base64.b64decode(b64_blob)
             nonce = combined[:12]
             ciphertext = combined[12:]
 
-            aesgcm = AESGCM(self.encryption_key)
+            aesgcm = AESGCM(key)
             plaintext_bytes = aesgcm.decrypt(nonce, ciphertext, None)
             plaintext = plaintext_bytes.decode("utf-8")
 
@@ -89,8 +170,6 @@ class FieldEncryption:
                 return json.loads(plaintext)
             except json.JSONDecodeError:
                 return plaintext
-        except ImportError:
-            raise ImportError("cryptography not installed")
         except Exception as e:
             # Fail loud. Returning ciphertext as if it were plaintext masks
             # key-rotation errors / corruption and leaks the 'encrypted:' blob

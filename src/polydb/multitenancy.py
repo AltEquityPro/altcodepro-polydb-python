@@ -2,10 +2,42 @@
 """
 Multi-tenancy enforcement and isolation
 """
+import re
 from typing import Dict, Any, List, Optional, Callable
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from enum import Enum
+
+from .errors import ValidationError
+
+# Schema/database names get interpolated into DDL, which cannot be
+# parameterised - a bind parameter is a *value*, and these are identifiers.
+# So they need the same allowlist the SQL adapter already applies to every
+# table and column name via utils.validate_table_name. These DDL paths were
+# the one place that skipped it.
+_SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+#: Longest identifier PostgreSQL accepts.
+_MAX_IDENTIFIER_LENGTH = 63
+
+
+def _validate_sql_identifier(value: str, *, kind: str) -> str:
+    """Allowlist a schema/database name before it is spliced into DDL.
+
+    Rejects anything that is not a bare identifier, so a tenant-derived name
+    such as ``x; DROP SCHEMA public CASCADE; --`` can never reach the database.
+    """
+    if not isinstance(value, str) or not value:
+        raise ValidationError(f"Invalid {kind}: {value!r} (must be a non-empty string)")
+    if len(value) > _MAX_IDENTIFIER_LENGTH:
+        raise ValidationError(
+            f"Invalid {kind}: {value!r} exceeds {_MAX_IDENTIFIER_LENGTH} characters"
+        )
+    if not _SQL_IDENTIFIER_RE.match(value):
+        raise ValidationError(
+            f"Invalid {kind}: {value!r}. Only letters, digits and underscores are "
+            "allowed, and it may not start with a digit."
+        )
+    return value
 
 
 class IsolationLevel(Enum):
@@ -172,12 +204,16 @@ class TenantMigrationManager:
         
         if config.isolation_level == IsolationLevel.SEPARATE_SCHEMA:
             # Create schema
-            schema_sql = f"CREATE SCHEMA IF NOT EXISTS {config.schema_name};"
+            schema = _validate_sql_identifier(config.schema_name, kind="schema_name")
+            schema_sql = f"CREATE SCHEMA IF NOT EXISTS {schema};"
             self.factory._sql.execute(schema_sql)
         
         elif config.isolation_level == IsolationLevel.SEPARATE_DATABASE:
             # Create database (requires superuser)
-            db_sql = f"CREATE DATABASE {config.database_name};"
+            database = _validate_sql_identifier(
+                config.database_name, kind="database_name"
+            )
+            db_sql = f"CREATE DATABASE {database};"
             self.factory._sql.execute(db_sql)
     
     def deprovision_tenant(self, tenant_id: str):
@@ -188,10 +224,14 @@ class TenantMigrationManager:
         
         if config.isolation_level == IsolationLevel.SEPARATE_SCHEMA:
             # Drop schema
-            schema_sql = f"DROP SCHEMA IF EXISTS {config.schema_name} CASCADE;"
+            schema = _validate_sql_identifier(config.schema_name, kind="schema_name")
+            schema_sql = f"DROP SCHEMA IF EXISTS {schema} CASCADE;"
             self.factory._sql.execute(schema_sql)
         
         elif config.isolation_level == IsolationLevel.SEPARATE_DATABASE:
             # Drop database
-            db_sql = f"DROP DATABASE IF EXISTS {config.database_name};"
+            database = _validate_sql_identifier(
+                config.database_name, kind="database_name"
+            )
+            db_sql = f"DROP DATABASE IF EXISTS {database};"
             self.factory._sql.execute(db_sql)

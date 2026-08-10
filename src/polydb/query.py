@@ -2,9 +2,47 @@
 
 from __future__ import annotations
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Mapping, Optional, Union
 from enum import Enum
+from .errors import ValidationError
 from .utils import validate_column_name
+
+#: Escape character used for LIKE patterns built from user values.
+LIKE_ESCAPE_CHAR = "\\"
+
+
+def _escape_like(value: Any) -> str:
+    """Neutralise LIKE metacharacters in a value before it is wrapped in wildcards.
+
+    ``CONTAINS``/``STARTS_WITH``/``ENDS_WITH`` mean "this literal substring".
+    The value is bound as a parameter (so there is no SQL injection here), but
+    an unescaped ``%`` or ``_`` in it is still interpreted by the pattern
+    matcher: it silently widens the match, and a leading ``%`` turns an
+    index-friendly prefix scan into a full scan.
+    """
+    text = str(value)
+    for char in (LIKE_ESCAPE_CHAR, "%", "_"):
+        text = text.replace(char, LIKE_ESCAPE_CHAR + char)
+    return text
+
+
+def _reject_mapping_value(f: "QueryFilter") -> None:
+    """Refuse dict filter values on the NoSQL path.
+
+    A document store reads a dict on the right-hand side of a field as an
+    operator expression, so a filter value that reaches here straight from
+    request input - ``where("password", EQ, {"$gt": ""})`` - stops being a
+    comparison and becomes "any document with a password", i.e. auth bypass
+    plus full-collection extraction. Nothing goes through QueryBuilder with a
+    legitimate dict value; lists stay allowed because ``IN`` needs them (and a
+    list can never be read as an operator).
+    """
+    values = f.value if isinstance(f.value, (list, tuple, set)) else [f.value]
+    if isinstance(f.value, Mapping) or any(isinstance(v, Mapping) for v in values):
+        raise ValidationError(
+            f"Invalid filter value for '{f.field}': dict values are not allowed "
+            "in NoSQL filters (they would be interpreted as query operators)."
+        )
 
 
 class Operator(Enum):
@@ -175,16 +213,16 @@ class QueryBuilder:
                 params.extend(f.value)
 
             elif f.operator == Operator.CONTAINS:
-                clauses.append(f"{f.field} LIKE %s")
-                params.append(f"%{f.value}%")
+                clauses.append(f"{f.field} LIKE %s ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                params.append(f"%{_escape_like(f.value)}%")
 
             elif f.operator == Operator.STARTS_WITH:
-                clauses.append(f"{f.field} LIKE %s")
-                params.append(f"{f.value}%")
+                clauses.append(f"{f.field} LIKE %s ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                params.append(f"{_escape_like(f.value)}%")
 
             elif f.operator == Operator.ENDS_WITH:
-                clauses.append(f"{f.field} LIKE %s")
-                params.append(f"%{f.value}")
+                clauses.append(f"{f.field} LIKE %s ESCAPE '{LIKE_ESCAPE_CHAR}'")
+                params.append(f"%{_escape_like(f.value)}")
 
         return " AND ".join(clauses), params
 
@@ -197,6 +235,7 @@ class QueryBuilder:
         result = {}
 
         for f in self.filters:
+            _reject_mapping_value(f)
 
             if f.operator == Operator.EQ:
                 result[f.field] = f.value
