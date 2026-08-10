@@ -1,7 +1,9 @@
 # src/polydb/audit/AuditStorage.py
 from __future__ import annotations
 
+import hmac
 import threading
+from dataclasses import dataclass
 from typing import Optional, Dict, Any
 
 from .models import AuditRecord
@@ -97,7 +99,20 @@ class AuditStorage:
         and re-chains instead of forking. (threading.Lock alone was only
         process-local — the old "distributed-safe" claim was false.)"""
         from dataclasses import asdict
-        from .models import compute_audit_hash
+        from .models import (
+            AuditKeyMissingError,
+            AUDIT_HMAC_KEY_ENV,
+            audit_hmac_key,
+            compute_audit_hash,
+            require_hmac,
+        )
+
+        if require_hmac() and audit_hmac_key() is None:
+            raise AuditKeyMissingError(
+                f"{AUDIT_HMAC_KEY_ENV} is unset. An unkeyed audit hash can be "
+                "recomputed by anyone who can write the log, so this "
+                "deployment has asked to refuse writing one."
+            )
 
         last_err: Optional[Exception] = None
         for _ in range(8):
@@ -139,11 +154,38 @@ class AuditStorage:
         raise last_err or RuntimeError("audit persist failed after retries")
 
     def verify_chain(self, tenant_id: Optional[str] = None) -> bool:
-        """Verify BOTH chain linkage AND per-record content integrity.
-        The old version only checked previous_hash linkage, so editing
-        before/after/action while leaving `hash` intact passed silently."""
+        """Verify BOTH chain linkage AND per-record content integrity."""
+        return self.verify_chain_detailed(tenant_id).ok
+
+    def verify_chain_detailed(
+        self, tenant_id: Optional[str] = None
+    ) -> "ChainVerification":
+        """Verify the chain, reporting *why* rather than only whether.
+
+        Two things are checked per record: that it links to its predecessor,
+        and that its own digest still matches its content. The second is what
+        catches an editor who changed ``before``/``after``/``action`` and left
+        ``hash`` alone.
+
+        Records written before ``POLYDB_AUDIT_HMAC_KEY`` was configured carry
+        an unkeyed SHA-256 and cannot be re-verified with the key. They are
+        accepted, but only *before* the first keyed record in the chain -- and
+        that restriction is what keeps it from being a loophole rather than a
+        migration path:
+
+        * An attacker cannot append unkeyed records after the cutover, because
+          once a keyed record has been seen every later record must be keyed.
+        * An attacker cannot rewrite the legacy prefix either. Rewriting record
+          N means recomputing ``hash(N)``, which is ``previous_hash`` inside
+          record N+1's payload -- and if N+1 is keyed, its digest cannot be
+          recomputed without the key.
+
+        So configuring a key seals everything written up to that moment as well
+        as everything after it. ``legacy_records`` reports how much of the
+        chain is still resting on that seal.
+        """
         from ..query import QueryBuilder, Operator
-        from .models import compute_audit_hash
+        from .models import audit_hmac_key, compute_audit_hash
 
         builder = QueryBuilder()
         if tenant_id is not None:
@@ -152,13 +194,69 @@ class AuditStorage:
 
         records = self.sql.query_linq("polydb_audit_log", builder)
         if not records:
-            return True
+            return ChainVerification(ok=True)
 
+        key = audit_hmac_key()
         prev = ""
-        for r in records:
+        legacy = 0
+        seen_keyed = False
+
+        for index, r in enumerate(records):
+            audit_id = r.get("audit_id")
+
             if (r.get("previous_hash") or "") != prev:
-                return False
-            if r.get("hash") != compute_audit_hash(r):  # content tamper check
-                return False
-            prev = r.get("hash")
-        return True
+                return ChainVerification(
+                    ok=False,
+                    broken_at=index,
+                    audit_id=audit_id,
+                    reason="link",
+                    legacy_records=legacy,
+                )
+
+            stored = r.get("hash") or ""
+
+            if key is not None and hmac.compare_digest(
+                stored, compute_audit_hash(r, key=key)
+            ):
+                seen_keyed = True
+            elif not seen_keyed and hmac.compare_digest(
+                stored, compute_audit_hash(r, key=None)
+            ):
+                # Predates the key. Sealed by the first keyed record that
+                # follows it, so it is only trusted while none has appeared.
+                legacy += 1
+            else:
+                # Distinguish the two ways this arrives. If the *unkeyed*
+                # digest matches the record as stored, the content is intact
+                # and the record simply was not keyed - which after the
+                # cutover is what stripping the key looks like. Otherwise the
+                # record itself was edited.
+                downgraded = seen_keyed and hmac.compare_digest(
+                    stored, compute_audit_hash(r, key=None)
+                )
+                return ChainVerification(
+                    ok=False,
+                    broken_at=index,
+                    audit_id=audit_id,
+                    reason="unkeyed_after_cutover" if downgraded else "content",
+                    legacy_records=legacy,
+                )
+
+            prev = stored
+
+        return ChainVerification(ok=True, legacy_records=legacy)
+
+
+@dataclass(frozen=True)
+class ChainVerification:
+    """The outcome of :meth:`AuditStorage.verify_chain_detailed`."""
+
+    ok: bool
+    broken_at: Optional[int] = None
+    audit_id: Optional[str] = None
+    #: "link" (previous_hash mismatch), "content" (record edited), or
+    #: "unkeyed_after_cutover" (an unkeyed record appended after keying began,
+    #: which is what stripping the key would look like).
+    reason: Optional[str] = None
+    #: How many leading records still carry a pre-key unkeyed digest.
+    legacy_records: int = 0
