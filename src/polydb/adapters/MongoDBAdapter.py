@@ -135,6 +135,34 @@ class MongoDBAdapter(NoSQLKVAdapter):
                 self._indexed_collections.add(collection_name)
 
     # -----------------------------------------------------
+    # Internal <-> domain field mapping
+    # -----------------------------------------------------
+
+    def _finalize_doc(self, model: type, doc: JsonDict) -> JsonDict:
+        """
+        Strip PolyDB's internal _pk/_rk storage keys before returning a
+        record, mapping each back to the domain field it was derived from
+        (the model's declared partition_key/sort_key) -- mirrors
+        AzureTableStorageAdapter._unpack_entity, which already does this
+        for PartitionKey/RowKey. Without it, callers see raw storage-
+        internal column names instead of their own schema's field names.
+        Guarded with setdefault so a real stored property never gets
+        clobbered by the derived value.
+        """
+        pk_field, rk_field = self._pk_rk_field_names(model)
+        pk_val = doc.pop("_pk", None)
+        rk_val = doc.pop("_rk", None)
+
+        if pk_val is not None:
+            doc.setdefault(pk_field, pk_val)
+        if rk_val is not None:
+            doc.setdefault(rk_field, rk_val)
+
+        doc.setdefault("id", rk_val)
+
+        return doc
+
+    # -----------------------------------------------------
     # PUT
     # -----------------------------------------------------
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
@@ -158,11 +186,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
             )
 
             # return full stored row (tests expect this)
-            result = dict(payload)
-            result.pop("_pk", None)
-            result.pop("_rk", None)
-
-            return result
+            return self._finalize_doc(model, dict(payload))
 
         except Exception as e:
             raise NoSQLError(f"MongoDB put failed: {e}")
@@ -182,9 +206,8 @@ class MongoDBAdapter(NoSQLKVAdapter):
                 return None
 
             doc.pop("_id", None)
-            doc.setdefault("id", rk)
 
-            return doc
+            return self._finalize_doc(model, doc)
 
         except Exception as e:
             raise NoSQLError(f"MongoDB get failed: {e}")
@@ -215,8 +238,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
             for doc in cursor:
                 doc.pop("_id", None)
-                doc.setdefault("id", doc.get("_rk"))
-                rows.append(doc)
+                rows.append(self._finalize_doc(model, doc))
 
             if not rows:
                 return [], None
@@ -283,8 +305,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
             for doc in cursor:
                 doc.pop("_id", None)
-                doc.setdefault("id", doc.get("_rk"))
-                results.append(doc)
+                results.append(self._finalize_doc(model, doc))
 
             return results
 
