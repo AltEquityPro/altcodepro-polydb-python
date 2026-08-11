@@ -31,6 +31,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
         self._client = None
         self._lock = threading.Lock()
+        self._indexed_collections: set = set()
 
         self._initialize_client()
 
@@ -74,7 +75,45 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
         collection_name = meta.get("collection") or meta.get("table") or model.__name__.lower()
 
-        return self._client[self.db_name][collection_name]  # type: ignore
+        collection = self._client[self.db_name][collection_name]  # type: ignore
+
+        self._ensure_pk_rk_index(collection, collection_name)
+
+        return collection
+
+    def _ensure_pk_rk_index(self, collection, collection_name: str) -> None:
+        """
+        Create the compound (_pk, _rk) index once per collection.
+
+        Without it, every _get_raw/_put_raw lookup and query_page's
+        `.sort("_pk")` scan the whole collection -- on Cosmos DB's Mongo
+        API that's a cross-partition fan-out, billed and latent
+        accordingly. Best-effort: a provider that rejects index creation
+        (e.g. restricted tier) shouldn't take the adapter down, so a
+        failure here is logged once and not retried on every call.
+        Note: this is a logical uniqueness/query index only -- it does
+        NOT retroactively set Cosmos's physical shard key, which can only
+        be chosen at container-creation time.
+        """
+        if collection_name in self._indexed_collections:
+            return
+
+        with self._lock:
+            if collection_name in self._indexed_collections:
+                return
+
+            try:
+                collection.create_index(
+                    [("_pk", 1), ("_rk", 1)], unique=True, name="pk_rk_unique"
+                )
+            except Exception:
+                self.logger.warning(
+                    "Could not ensure (_pk, _rk) index on %s",
+                    collection_name,
+                    exc_info=True,
+                )
+            finally:
+                self._indexed_collections.add(collection_name)
 
     # -----------------------------------------------------
     # PUT
@@ -87,7 +126,11 @@ class MongoDBAdapter(NoSQLKVAdapter):
             payload = dict(data or {})
             payload["_pk"] = pk
             payload["_rk"] = rk
-            payload["id"] = pk
+            # _rk is the record's natural identifier (the base class
+            # already falls back to `id` when a model has no explicit
+            # sort_key); _pk is just the tenant/partition grouping, so it
+            # must never overwrite a caller-supplied `id`.
+            payload.setdefault("id", rk)
 
             collection.update_one(
                 {"_pk": pk, "_rk": rk},
@@ -120,7 +163,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
                 return None
 
             doc.pop("_id", None)
-            doc.setdefault("id", pk)
+            doc.setdefault("id", rk)
 
             return doc
 
@@ -151,7 +194,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
             for doc in cursor:
                 doc.pop("_id", None)
-                doc.setdefault("id", doc.get("_pk"))
+                doc.setdefault("id", doc.get("_rk"))
                 rows.append(doc)
 
             if not rows:
@@ -179,7 +222,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
             for k, v in (filters or {}).items():
 
                 if k == "id":
-                    query["_pk"] = v
+                    query["_rk"] = v
                     continue
 
                 if k.endswith("__gt"):
@@ -216,7 +259,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
 
             for doc in cursor:
                 doc.pop("_id", None)
-                doc.setdefault("id", doc.get("_pk"))
+                doc.setdefault("id", doc.get("_rk"))
                 results.append(doc)
 
             return results
@@ -238,7 +281,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
             if result.deleted_count == 0:
                 raise DatabaseError(f"Item {pk}/{rk} does not exist")
 
-            return {"id": pk}
+            return {"id": rk}
 
         except DatabaseError:
             raise
