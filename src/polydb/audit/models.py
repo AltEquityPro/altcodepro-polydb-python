@@ -1,12 +1,70 @@
 # src/polydb/audit/models.py
+"""The audit record and its integrity hash.
+
+The chain used a plain SHA-256 over the record's canonical payload. That
+detects accidental corruption and it detects an editor who forgets to
+recompute the hash - but it does not detect the adversary an audit log exists
+for. Anyone who can write the table can also recompute SHA-256, so they can
+rewrite a record, re-hash it, and re-hash every record after it: the chain
+still verifies, and the tampering is invisible. The digest was unkeyed, so
+"can write the log" implied "can forge the log".
+
+``POLYDB_AUDIT_HMAC_KEY`` turns the digest into HMAC-SHA256. The output is
+still 64 hex characters, so it fits the existing ``VARCHAR(64)`` columns and
+needs no migration - only the way the value is derived changes.
+
+Records written before a key was configured stay verifiable. See
+``AuditStorage.verify_chain`` for the cutover rule that makes that safe rather
+than a loophole.
+"""
 
 from dataclasses import dataclass, asdict
 from typing import Any, Dict, List, Optional
-import uuid
 import hashlib
+import hmac
 import json
+import logging
+import os
+import uuid
 from datetime import datetime, timezone
 from ..json_safe import json_safe
+
+logger = logging.getLogger("polydb.audit")
+
+#: Env var holding the audit HMAC key. Absent means legacy unkeyed hashing.
+AUDIT_HMAC_KEY_ENV = "POLYDB_AUDIT_HMAC_KEY"
+
+#: Set to 1/true/yes to refuse to write audit records without a key, for
+#: deployments that would rather fail than keep a forgeable log.
+AUDIT_REQUIRE_HMAC_ENV = "POLYDB_AUDIT_REQUIRE_HMAC"
+
+_warned_no_key = False
+
+#: Distinguishes "caller did not specify a key" from "caller specified None",
+#: which verification needs in order to check the legacy variant deliberately.
+_UNSET = object()
+
+
+class AuditKeyMissingError(RuntimeError):
+    """No audit HMAC key, and the deployment asked to require one."""
+
+
+def audit_hmac_key() -> Optional[bytes]:
+    """The configured audit key, or ``None``.
+
+    Read per call rather than cached so a key rotated into the environment
+    takes effect without a restart, and so tests can set it per case.
+    """
+    raw = os.getenv(AUDIT_HMAC_KEY_ENV, "").strip()
+    return raw.encode("utf-8") if raw else None
+
+
+def require_hmac() -> bool:
+    return os.getenv(AUDIT_REQUIRE_HMAC_ENV, "").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+    )
 
 
 def _iso(ts: Any) -> str:
@@ -43,8 +101,42 @@ def canonical_audit_payload(src: Dict[str, Any]) -> str:
     return json.dumps(payload, sort_keys=True, default=json_safe)
 
 
-def compute_audit_hash(src: Dict[str, Any]) -> str:
-    return hashlib.sha256(canonical_audit_payload(src).encode()).hexdigest()
+def compute_audit_hash(
+    src: Dict[str, Any], *, key: Optional[bytes] = _UNSET  # type: ignore[assignment]
+) -> str:
+    """The record's integrity digest, keyed when a key is available.
+
+    ``key`` defaults to whatever the environment provides; pass it explicitly
+    (including ``None``) to compute a specific variant, which is what
+    verification does when it has to check a record written under the other
+    scheme.
+    """
+    if key is _UNSET:
+        key = audit_hmac_key()
+        if key is None:
+            _warn_unkeyed_once()
+
+    payload = canonical_audit_payload(src).encode()
+    if key is None:
+        return hashlib.sha256(payload).hexdigest()
+    return hmac.new(key, payload, hashlib.sha256).hexdigest()
+
+
+def _warn_unkeyed_once() -> None:
+    global _warned_no_key
+    if _warned_no_key:
+        return
+    _warned_no_key = True
+    logger.warning(
+        "Audit records are being hashed without a key (%s is unset). The "
+        "chain still detects accidental corruption, but anyone who can write "
+        "polydb_audit_log can recompute it, so it does not detect deliberate "
+        "tampering. Set %s to seal the log; set %s=1 to refuse to write "
+        "without one.",
+        AUDIT_HMAC_KEY_ENV,
+        AUDIT_HMAC_KEY_ENV,
+        AUDIT_REQUIRE_HMAC_ENV,
+    )
 
 
 @dataclass

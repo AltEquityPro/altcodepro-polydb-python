@@ -4,9 +4,32 @@ Schema management and migrations
 """
 from typing import Dict, List, Optional, Any
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import Enum
 import json
 from datetime import datetime
+
+from .errors import ValidationError
+from .utils import validate_column_name, validate_table_name
+
+
+def _render_default(value: Any) -> str:
+    """Render a column DEFAULT as a literal that cannot escape its context.
+
+    A string default used to be interpolated as ``DEFAULT '{value}'``, so a
+    single quote in it closed the literal and the rest of the value was parsed
+    as SQL - the whole statement is DDL, which cannot be parameterised, so the
+    literal has to be made safe here. Quotes are doubled (the SQL-standard
+    escape); numbers and booleans keep rendering bare as before.
+    """
+    if isinstance(value, bool) or isinstance(value, (int, float, Decimal)):
+        return f"DEFAULT {value}"
+
+    text = str(value)
+    if "\x00" in text:
+        raise ValidationError("Invalid column default: NUL characters are not allowed")
+    escaped = text.replace("'", "''")
+    return f"DEFAULT '{escaped}'"
 
 
 class ColumnType(Enum):
@@ -61,10 +84,11 @@ class SchemaBuilder:
     
     def to_create_table(self, table_name: str) -> str:
         """Generate CREATE TABLE statement"""
+        validate_table_name(table_name)
         col_defs = []
-        
+
         for col in self.columns:
-            parts = [col.name]
+            parts = [validate_column_name(col.name)]
             
             # Type
             if col.type == ColumnType.VARCHAR and col.max_length:
@@ -78,10 +102,7 @@ class SchemaBuilder:
             
             # Default
             if col.default is not None:
-                if isinstance(col.default, str):
-                    parts.append(f"DEFAULT '{col.default}'")
-                else:
-                    parts.append(f"DEFAULT {col.default}")
+                parts.append(_render_default(col.default))
             
             # Unique
             if col.unique:
@@ -91,7 +112,8 @@ class SchemaBuilder:
         
         # Primary key
         if self.primary_keys:
-            col_defs.append(f"PRIMARY KEY ({', '.join(self.primary_keys)})")
+            pk_cols = [validate_column_name(c) for c in self.primary_keys]
+            col_defs.append(f"PRIMARY KEY ({', '.join(pk_cols)})")
         
         sql = f"CREATE TABLE IF NOT EXISTS {table_name} (\n"
         sql += ",\n".join(f"  {col}" for col in col_defs)
@@ -103,10 +125,15 @@ class SchemaBuilder:
         """Generate CREATE INDEX statements"""
         statements = []
         
+        validate_table_name(table_name)
+
         for idx in self.indexes:
             unique = "UNIQUE " if idx.unique else ""
-            cols = ", ".join(idx.columns)
-            sql = f"CREATE {unique}INDEX IF NOT EXISTS {idx.name} ON {table_name}({cols});"
+            cols = ", ".join(validate_column_name(c) for c in idx.columns)
+            sql = (
+                f"CREATE {unique}INDEX IF NOT EXISTS {validate_table_name(idx.name)} "
+                f"ON {table_name}({cols});"
+            )
             statements.append(sql)
         
         return statements
