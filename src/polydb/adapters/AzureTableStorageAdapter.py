@@ -20,7 +20,7 @@ from ..json_safe import json_safe
 from ..errors import NoSQLError, ConnectionError
 from ..retry import retry
 from ..types import JsonDict
-from ..models import PartitionConfig
+from ..models import PageResult, PartitionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +155,16 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         if isinstance(v, datetime):
             return v
-
+        if isinstance(v, int):
+            # Azure Table Int32 range: -2_147_483_648 … 2_147_483_647
+            if -2_147_483_648 <= v <= 2_147_483_647:
+                return v
+            # Outside Int32 → force Int64-compatible representation
+            # The Azure SDK accepts Python ints larger than Int32 and stores them as Edm.Int64
+            # when they fit in 64 bits. For values that exceed even Int64 we fall back to string.
+            if -9_223_372_036_854_775_808 <= v <= 9_223_372_036_854_775_807:
+                return v  # will be stored as Edm.Int64
+            return str(v)  # safety net for arbitrarily large ints
         if isinstance(v, (str, bool, int, float)):
             return v
 
@@ -164,14 +173,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     def _decode_value(self, v: Any) -> Any:
         if isinstance(v, str):
             if v.startswith(_JSON_PREFIX):
-                payload = v[len(_JSON_PREFIX):]
+                payload = v[len(_JSON_PREFIX) :]
                 try:
                     return json.loads(payload)
                 except Exception:
                     return v
 
             if v.startswith(_BYTES_PREFIX):
-                payload = v[len(_BYTES_PREFIX):].strip()
+                payload = v[len(_BYTES_PREFIX) :].strip()
                 if (len(payload) % 4) == 1:
                     return v
                 if not _BASE64_RE.match(payload):
@@ -646,6 +655,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
     @property
     def capabilities(self):
         from ..models import BackendCapabilities
+
         return BackendCapabilities(
             server_order=False,
             server_filter=True,
