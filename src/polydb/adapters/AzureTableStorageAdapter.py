@@ -24,6 +24,16 @@ from ..models import PageResult, PartitionConfig
 
 logger = logging.getLogger(__name__)
 
+# Imported at module scope (unlike the clients, which stay lazy) because these
+# are pure value types with no connection cost, and both the encode and decode
+# paths need them per field. Guarded so importing polydb without the azure
+# extra still works -- in that state nothing in this adapter functions anyway.
+try:
+    from azure.data.tables import EdmType, EntityProperty
+except ImportError:  # pragma: no cover - azure extra not installed
+    EdmType = None  # type: ignore[assignment]
+    EntityProperty = None  # type: ignore[assignment]
+
 _BYTES_PREFIX = "@@polydb_bytes@@:"
 _JSON_PREFIX = "@@polydb_json@@:"
 _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
@@ -155,15 +165,25 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         if isinstance(v, datetime):
             return v
-        if isinstance(v, int):
+        if isinstance(v, int) and not isinstance(v, bool):
             # Azure Table Int32 range: -2_147_483_648 … 2_147_483_647
             if -2_147_483_648 <= v <= 2_147_483_647:
                 return v
-            # Outside Int32 → force Int64-compatible representation
-            # The Azure SDK accepts Python ints larger than Int32 and stores them as Edm.Int64
-            # when they fit in 64 bits. For values that exceed even Int64 we fall back to string.
+            # Outside Int32 → must be tagged Edm.Int64 EXPLICITLY.
+            #
+            # Returning the bare int here does NOT work, despite reading like
+            # it should: the SDK's _add_entity_properties dispatches on
+            # type(value), and every Python int maps to _to_entity_int32,
+            # which raises "<n> is too large to be cast to type EdmType.INT32"
+            # for anything >= 2**31. It never infers Int64. The one documented
+            # way to reach Edm.Int64 is an EntityProperty tuple -- the
+            # serializer branches on isinstance(value, tuple) and takes the
+            # edm_type from element 1 -- so that is what we hand it.
+            # _decode_value unwraps the same shape on the way back out.
             if -9_223_372_036_854_775_808 <= v <= 9_223_372_036_854_775_807:
-                return v  # will be stored as Edm.Int64
+                if EntityProperty is not None and EdmType is not None:
+                    return EntityProperty(v, EdmType.INT64)
+                return str(v)
             return str(v)  # safety net for arbitrarily large ints
         if isinstance(v, (str, bool, int, float)):
             return v
@@ -171,6 +191,13 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         return _JSON_PREFIX + json.dumps(v, default=json_safe)
 
     def _decode_value(self, v: Any) -> Any:
+        # Edm.Int64 comes back as EntityProperty(value, EdmType.INT64), not as
+        # a plain int -- the SDK's _from_entity_int64 wraps it. Unwrap here so
+        # a large int round-trips as the int that was written; left alone it
+        # would surface to callers as a 2-tuple and, on the next write, be
+        # JSON-encoded by the list/tuple branch of _encode_value.
+        if EntityProperty is not None and isinstance(v, EntityProperty):
+            return v.value
         if isinstance(v, str):
             if v.startswith(_JSON_PREFIX):
                 payload = v[len(_JSON_PREFIX) :]
