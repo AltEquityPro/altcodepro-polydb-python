@@ -290,6 +290,28 @@ class KafkaQueueAdapter(QueueAdapter):
             raise QueueError("ack_id is required for Kafka ack")
         return self._commit(ack_id, queue_name)
 
+    def nack(self, ack_id: str, queue_name: str = "default") -> bool:
+        """
+        Documented no-op, not a design gap: receive()'s own docstring
+        already establishes that this adapter deliberately never commits
+        an offset until ack()/delete() does. That means a message is
+        already effectively "nacked" -- redeliverable to this (or any
+        other) consumer sharing group_id -- the instant it's received
+        and not yet acked; there is no separate broker-side "put it back"
+        call the way AMQP's basic_nack is, because nothing was ever
+        marked done in the first place.
+
+        This only pops the pending entry (mirroring _commit's own
+        "unknown/already-handled id is a harmless no-op" convention, and
+        returning the same True-if-there-was-something-to-act-on /
+        False-if-not shape _commit does) so a caller that explicitly
+        nacks doesn't also get to ack() the same id afterward -- it
+        exists for API-shape consistency with the other adapters'
+        nack(), not because Kafka needs an explicit call here to achieve
+        the redelivery.
+        """
+        return self._pending.pop(ack_id, None) is not None
+
     def close(self) -> None:
         """
         Flush the producer and close every consumer. Not part of

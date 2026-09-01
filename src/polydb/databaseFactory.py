@@ -1002,6 +1002,33 @@ class DatabaseFactory:
             else queue.delete(message_id, queue_name)
         )
 
+    def nack_queue(
+        self, ack_id: str, *, queue_name: str = "default", adapter_name: str = "azure_queue"
+    ) -> bool:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.nack(ack_id, queue_name)
+
+    def purge_queue(self, *, queue_name: str = "default", adapter_name: str = "azure_queue") -> int:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.purge(queue_name)
+
+    def declare_queue(
+        self,
+        *,
+        queue_name: str = "default",
+        durable: bool = True,
+        dead_letter_queue: Optional[str] = None,
+        adapter_name: str = "azure_queue",
+    ) -> bool:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.declare(queue_name, durable=durable, dead_letter_queue=dead_letter_queue)
+
+    def queue_status(
+        self, *, queue_name: str = "default", adapter_name: str = "azure_queue"
+    ) -> Dict[str, Any]:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.status(queue_name)
+
     # ════════════════════════════════════════════════════════════════════════════════════
     # FILE STORAGE
     # ═══════════════════════════════════════════════════════════════════════════════════

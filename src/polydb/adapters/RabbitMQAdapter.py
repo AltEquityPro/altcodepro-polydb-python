@@ -92,6 +92,23 @@ class RabbitMQAdapter(QueueAdapter):
             self._initialize_connection()
 
     def _ensure_queue(self, queue_name: str) -> None:
+        """Auto-create-on-first-use path for send()/receive(). Plain
+        `durable=True`, no arguments -- if this ran again on a queue
+        `declare()` already provisioned WITH dead-letter arguments,
+        RabbitMQ would reject it as a channel-level PRECONDITION_FAILED
+        (re-declaring an existing queue with different `arguments` is an
+        error, not a silent merge). That doesn't happen here because
+        `declare()` adds `queue_name` to `_declared_queues` itself after
+        declaring it -- the `if queue_name in self._declared_queues:
+        return` guard below short-circuits before this method's own
+        plain queue_declare ever runs, as long as `declare()` was called
+        before the first send()/receive() on that queue. Calling
+        `declare()` *after* an implicit auto-create already happened on
+        the same name is the one ordering this doesn't protect against --
+        the second declare (with arguments) would itself hit
+        PRECONDITION_FAILED against the already-durable/no-arguments
+        queue this method created first.
+        """
         if queue_name in self._declared_queues:
             return
         self._channel.queue_declare(queue=queue_name, durable=True)
@@ -206,6 +223,97 @@ class RabbitMQAdapter(QueueAdapter):
         codebase's other adapters (SQS, Pub/Sub: ack is delete).
         """
         return self._ack_delivery(message_id)
+
+    def nack(self, ack_id: str, queue_name: str = "default") -> bool:
+        """basic_nack(requeue=True) -- puts the message straight back on
+        the queue for immediate redelivery, same `_pending` delivery-tag
+        lookup ack()/delete() already use, same "unknown id is a
+        harmless no-op" convention `_ack_delivery` establishes. This is
+        deliberately NOT how dead-lettering gets triggered (that's
+        `basic_nack(requeue=False)`/`basic_reject(requeue=False)` or a
+        TTL/max-length policy on the queue itself, not a per-call
+        requeue=False here) -- this method's contract is "redeliver now",
+        not "give up on it", so it always requeues."""
+        delivery_tag = self._pending.pop(ack_id, None)
+        if delivery_tag is None:
+            return False
+        try:
+            self._ensure_open()
+            self._channel.basic_nack(delivery_tag=delivery_tag, requeue=True)
+            return True
+        except Exception as e:
+            raise QueueError(f"RabbitMQ nack failed: {e}")
+
+    def purge(self, queue_name: str = "default") -> int:
+        """channel.queue_purge()'s Queue.PurgeOk response frame carries
+        the actual count RabbitMQ purged (`.method.message_count`) --
+        read from pika's own BlockingChannel.queue_purge return type
+        rather than assumed, verified against a real local broker."""
+        try:
+            self._ensure_open()
+            self._ensure_queue(queue_name)
+            result = self._channel.queue_purge(queue=queue_name)
+            return result.method.message_count
+        except Exception as e:
+            raise QueueError(f"RabbitMQ purge failed: {e}")
+
+    def declare(
+        self,
+        queue_name: str = "default",
+        *,
+        durable: bool = True,
+        dead_letter_queue: Optional[str] = None,
+    ) -> bool:
+        """Real AMQP dead-lettering via `x-dead-letter-exchange`/
+        `x-dead-letter-routing-key` queue arguments -- not a hand-rolled
+        shadow implementation that polls and re-routes messages itself.
+        The default exchange ("") + the DLQ's own name as routing key is
+        how AMQP delivers a dead-lettered message straight to a queue by
+        that name with no extra exchange/binding setup required.
+
+        The DLQ target is declared first, as an ordinary durable queue,
+        so the dead-letter-routing-key always has somewhere real to land
+        before the source queue (which references it) is declared.
+        """
+        try:
+            self._ensure_open()
+
+            arguments: Dict[str, Any] = {}
+            if dead_letter_queue:
+                self._channel.queue_declare(queue=dead_letter_queue, durable=True)
+                self._declared_queues.add(dead_letter_queue)
+                arguments["x-dead-letter-exchange"] = ""
+                arguments["x-dead-letter-routing-key"] = dead_letter_queue
+
+            self._channel.queue_declare(
+                queue=queue_name, durable=durable, arguments=arguments or None
+            )
+            # Marking it declared here is what keeps _ensure_queue()'s own
+            # implicit auto-create path (plain durable=True, no
+            # arguments) from ever re-declaring this queue with different
+            # arguments on the first send()/receive() -- see that
+            # method's docstring for the PRECONDITION_FAILED this avoids.
+            self._declared_queues.add(queue_name)
+            return True
+        except Exception as e:
+            raise QueueError(f"RabbitMQ declare failed: {e}")
+
+    def status(self, queue_name: str = "default") -> Dict[str, Any]:
+        """queue_declare(passive=True) -- "don't create it, just inspect
+        it" (raises if the queue doesn't already exist, unlike a plain
+        queue_declare) -- confirmed against pika's actual
+        BlockingChannel.queue_declare behavior, not assumed. Its
+        Queue.DeclareOk response frame carries both message_count and
+        consumer_count for a classic queue."""
+        try:
+            self._ensure_open()
+            result = self._channel.queue_declare(queue=queue_name, passive=True)
+            return {
+                "message_count": result.method.message_count,
+                "consumer_count": result.method.consumer_count,
+            }
+        except Exception as e:
+            raise QueueError(f"RabbitMQ status failed: {e}")
 
     def close(self) -> None:
         """Close the channel/connection. Not part of QueueAdapter's

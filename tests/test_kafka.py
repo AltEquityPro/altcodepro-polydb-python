@@ -318,6 +318,53 @@ class TestKafkaQueueAdapterAckDelete:
 
 
 # ────────────────────────────────────────────────────────────────────────────
+# nack() -- a documented no-op, not a broker round trip
+#
+# receive()'s own docstring already establishes that this adapter never
+# commits an offset until ack()/delete() does -- so a received-but-not-yet-
+# acked message is already effectively "nacked" from Kafka's point of view.
+# nack() exists purely for API-shape parity with RabbitMQAdapter's real
+# basic_nack() call; it must never touch the mocked KafkaConsumer at all.
+# ────────────────────────────────────────────────────────────────────────────
+
+class TestKafkaQueueAdapterNack:
+    def _received_message(self, adapter, MockConsumer, offset=4):
+        tp = TopicPartition("orders", 0)
+        MockConsumer.return_value.poll.return_value = {tp: [_consumer_record(offset=offset)]}
+        out = adapter.receive(queue_name="orders", max_messages=1)
+        MockConsumer.return_value.poll.return_value = {}
+        return out[0]
+
+    def test_nack_pops_pending_without_committing_anything(self, adapter):
+        with patch("kafka.KafkaConsumer") as MockConsumer:
+            msg = self._received_message(adapter, MockConsumer, offset=2)
+
+            result = adapter.nack(msg["receipt_handle"], queue_name="orders")
+
+            assert result is True
+            # The whole point: no offset commit happens for a nack.
+            MockConsumer.return_value.commit.assert_not_called()
+            assert msg["receipt_handle"] not in adapter._pending
+
+    def test_nack_then_ack_of_the_same_id_is_a_no_op_not_a_double_commit(self, adapter):
+        """Once nack() has popped the pending entry, a later ack() for
+        the same id must not find anything to commit -- there is nothing
+        left to "confirm consumed" for a message this adapter already
+        treated as not-yet-committed."""
+        with patch("kafka.KafkaConsumer") as MockConsumer:
+            msg = self._received_message(adapter, MockConsumer, offset=3)
+
+            adapter.nack(msg["receipt_handle"], queue_name="orders")
+            second = adapter.ack(msg["receipt_handle"], queue_name="orders")
+
+            assert second is False
+            MockConsumer.return_value.commit.assert_not_called()
+
+    def test_nack_of_unknown_message_id_is_a_harmless_no_op(self, adapter):
+        assert adapter.nack("99-99", queue_name="orders") is False
+
+
+# ────────────────────────────────────────────────────────────────────────────
 # close()
 # ────────────────────────────────────────────────────────────────────────────
 
