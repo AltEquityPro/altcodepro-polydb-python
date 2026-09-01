@@ -25,6 +25,13 @@ _NON_RETRYABLE_MARKERS = (
     "ResourceNotFound",
     "InvalidArgument",
     "AuthenticationFailed",
+    # session_vars' allow-list rejection (PostgreSQLAdapter._apply_session_vars) --
+    # a caller passing a session variable name outside the fixed allow-list is a
+    # programming error, not a transient one; the identical resolved call would
+    # fail identically on every retry, so this only burns the full backoff window
+    # for no chance of a different outcome (same reasoning already applied to the
+    # markers above).
+    "not in the allow-list",
 )
 
 

@@ -2,7 +2,7 @@
 import os
 import threading
 import time
-from typing import Any, Iterator, List, Optional, Tuple, Union
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 import hashlib
 from contextlib import contextmanager
 import json
@@ -19,6 +19,20 @@ from ..retry import retry
 from ..utils import validate_table_name, validate_column_name
 from ..query import QueryBuilder, Operator
 from ..types import JsonDict, Lookup
+
+# Postgres session variables this adapter is willing to SET (scoped to one
+# transaction, via set_config(..., is_local=True)) on a caller's behalf.
+# `session_vars` is a keyword-only parameter no request body/query string
+# ever reaches directly -- every caller is trusted engine code, never
+# attacker input -- but this allow-list is a second, independent guard
+# against a future caller (or a bug in one) asking this adapter to SET an
+# arbitrary Postgres GUC (search_path, role, statement_timeout, ...) it was
+# never built to accept. polydb stays tenant-unaware on purpose (see
+# databaseFactory.py's own module docstring) -- this mechanism is generic
+# ("set these session vars for one transaction"), not tenant-specific; the
+# one entry below is simply the one real caller (universal_engine's RLS
+# policies) needs today. Add a name here only when a real caller needs it.
+ALLOWED_SESSION_VARS = frozenset({"app.tenant_id"})
 
 
 class PostgreSQLAdapter:
@@ -208,6 +222,18 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
 
     def reset_pool(self):
+        # `self._lock` is a plain threading.Lock (not reentrant) --
+        # _initialize_pool() below acquires it itself, so it must NOT
+        # still be held when we call it, or this self-deadlocks (found by
+        # actually calling reset_pool() for the first time anywhere in
+        # this codebase, in tests/test_session_vars.py's pooled-connection
+        # leak test -- no prior caller ever exercised this method). The
+        # tiny window here where self._pool is briefly None before
+        # _initialize_pool() re-acquires the lock and sets it back is
+        # safe: that method's own `if not self._pool` check under its own
+        # lock is exactly what already protects concurrent callers of it
+        # (e.g. _get_connection()'s own lazy re-init), so it's not a new
+        # exposure.
         with self._lock:
             if self._pool:
                 try:
@@ -215,13 +241,47 @@ class PostgreSQLAdapter:
                 except Exception:
                     pass
                 self._pool = None
-            self._initialize_pool()
+        self._initialize_pool()
 
     def begin_transaction(self) -> Any:
         conn = self._get_connection()
         self._drain_transaction(conn)
         conn.autocommit = False
         return conn
+
+    def _apply_session_vars(self, conn: Any, session_vars: Optional[Dict[str, str]]) -> None:
+        """SET LOCAL-equivalent for a fixed, allow-listed set of Postgres
+        session variables, scoped to whatever transaction `conn` is
+        currently in -- reverts automatically at COMMIT/ROLLBACK, never
+        outlives the transaction it was set for. This is the fix for the
+        gap README documents: `SET LOCAL <var> = <value>` only means
+        anything on the exact connection/transaction the real query after
+        it runs on, so it has to be issued here, immediately before the
+        query, on the same `conn` -- never as a separate call the caller
+        could race against a pool checkin/checkout.
+
+        Uses `set_config(name, value, is_local)` rather than a literal
+        `SET LOCAL {key} = %s` string: `SET` itself has no bind-parameter
+        syntax in Postgres (the value has no placeholder form), but
+        `set_config` is an ordinary SQL function, so both the name and the
+        value are real query parameters -- nothing about either is ever
+        f-string'd into the SQL text. `is_local=True` is what gives this
+        `SET LOCAL`'s exact semantics (reverts at the end of the current
+        transaction) rather than `SET`'s session-lifetime one -- the
+        session-lifetime form is exactly the pooled-connection leak this
+        whole mechanism exists to avoid (see tests/test_session_vars.py's
+        leak-across-checkout proof).
+        """
+        if not session_vars:
+            return
+        with conn.cursor() as cur:
+            for key, value in session_vars.items():
+                if key not in ALLOWED_SESSION_VARS:
+                    raise DatabaseError(
+                        f"session_vars: {key!r} is not in the allow-list of Postgres "
+                        f"session variables this adapter will set"
+                    )
+                cur.execute("SELECT set_config(%s, %s, true)", [key, str(value)])
 
     def commit(self, tx: Any):
         if tx:
@@ -298,7 +358,14 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(DatabaseError,))
-    def insert(self, table: str, data: JsonDict, tx: Optional[Any] = None) -> JsonDict:
+    def insert(
+        self,
+        table: str,
+        data: JsonDict,
+        tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
+    ) -> JsonDict:
         table = validate_table_name(table)
         for k in data.keys():
             validate_column_name(k)
@@ -310,6 +377,13 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            # Applied regardless of who owns `conn` -- see this method's
+            # own `session_vars` parameter doc on why a caller-supplied tx
+            # still honors it (databaseFactory.py's create() is own_conn;
+            # universal_engine's idempotency.py/batches.py call insert-
+            # shaped methods on their own already-open tx and need this
+            # exact same call to take effect on it).
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             columns = ", ".join(data.keys())
             placeholders = ", ".join(["%s"] * len(data))
@@ -343,6 +417,8 @@ class PostgreSQLAdapter:
         limit: Optional[int] = None,
         offset: Optional[int] = None,
         tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> List[JsonDict]:
         table = validate_table_name(table)
         conn = tx
@@ -352,6 +428,7 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             sql = f"SELECT * FROM {table}"
             params: List[Any] = []
@@ -411,9 +488,13 @@ class PostgreSQLAdapter:
         page_size: int,
         continuation_token: Optional[str] = None,
         tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> Tuple[List[JsonDict], Optional[str]]:
         offset = int(continuation_token) if continuation_token else 0
-        results = self.select(table, query, limit=page_size + 1, offset=offset, tx=tx)
+        results = self.select(
+            table, query, limit=page_size + 1, offset=offset, tx=tx, session_vars=session_vars
+        )
         has_more = len(results) > page_size
         if has_more:
             results = results[:page_size]
@@ -431,6 +512,8 @@ class PostgreSQLAdapter:
         entity_id: Union[Any, Lookup],
         data: JsonDict,
         tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         table = validate_table_name(table)
         for k in data.keys():
@@ -443,6 +526,7 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             set_clause = ", ".join([f"{k} = %s" for k in data.keys()])
             params: List[Any] = [self._serialize_value(v) for v in data.values()]
@@ -485,7 +569,14 @@ class PostgreSQLAdapter:
     # ---------------------------------------------------------------------
 
     @retry(max_attempts=3, delay=1.0, exceptions=(DatabaseError,))
-    def upsert(self, table: str, data: JsonDict, tx: Optional[Any] = None) -> JsonDict:
+    def upsert(
+        self,
+        table: str,
+        data: JsonDict,
+        tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
+    ) -> JsonDict:
         table = validate_table_name(table)
         for k in data.keys():
             validate_column_name(k)
@@ -497,6 +588,7 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             columns = ", ".join(data.keys())
             placeholders = ", ".join(["%s"] * len(data))
@@ -548,7 +640,12 @@ class PostgreSQLAdapter:
 
     @retry(max_attempts=3, delay=1.0, exceptions=(DatabaseError,))
     def delete(
-        self, table: str, entity_id: Union[Any, Lookup], tx: Optional[Any] = None
+        self,
+        table: str,
+        entity_id: Union[Any, Lookup],
+        tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         table = validate_table_name(table)
         conn = tx
@@ -558,6 +655,7 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             params: List[Any] = []
             if isinstance(entity_id, dict):
@@ -742,6 +840,7 @@ class PostgreSQLAdapter:
         *,
         fetch: bool = False,
         fetch_one: bool = False,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> Union[None, JsonDict, List[JsonDict]]:
         conn = tx
         own_conn = False
@@ -751,6 +850,15 @@ class PostgreSQLAdapter:
 
         cursor = None
         try:
+            # execute() is the raw-SQL escape hatch a few callers already
+            # use for a query with no generic-CRUD equivalent (an atomic
+            # claim, a bulk UPDATE, an ORDER BY) -- those are exactly the
+            # callers RLS-protected engine-infrastructure tables need this
+            # for (see universal_engine's idempotency.py/batches.py),
+            # since they run several statements against the same `tx` and
+            # only need the session var set once per transaction, same as
+            # every other method above.
+            self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
             self.logger.debug("Executing raw SQL (%d params)", len(params or []))
             exec_params = self._serialize_params(params or [])

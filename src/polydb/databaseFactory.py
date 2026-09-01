@@ -359,6 +359,7 @@ class DatabaseFactory:
         data: JsonDict,
         *,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         meta = _extract_meta(model)
         name = _model_name(model)
@@ -378,7 +379,7 @@ class DatabaseFactory:
             nonlocal after_plain, success, entity_id
             if self._is_sql(meta, engine_override):
                 try:
-                    result = adapters.sql.insert(meta.table, data)
+                    result = adapters.sql.insert(meta.table, data, session_vars=session_vars)
                 except Exception as exc:
                     if not _is_unique_violation(exc):
                         raise
@@ -392,7 +393,7 @@ class DatabaseFactory:
                         conflict_cols,
                     )
                     update_data = {k: v for k, v in data.items() if k not in conflict_cols}
-                    result = adapters.sql.update(meta.table, where, update_data)
+                    result = adapters.sql.update(meta.table, where, update_data, session_vars=session_vars)
             else:
                 result = adapters.nosql.put(
                     (
@@ -442,6 +443,7 @@ class DatabaseFactory:
         cache_ttl: Optional[int] = None,
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> List[JsonDict]:
         name = _model_name(model)
         meta = _extract_meta(model)
@@ -455,7 +457,9 @@ class DatabaseFactory:
 
         def _op() -> List[JsonDict]:
             if self._is_sql(meta, engine_override):
-                raw = adapters.sql.select(meta.table, query, limit=limit, offset=offset)
+                raw = adapters.sql.select(
+                    meta.table, query, limit=limit, offset=offset, session_vars=session_vars
+                )
             else:
                 cls = (
                     model
@@ -496,6 +500,7 @@ class DatabaseFactory:
         no_cache: bool = False,
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> Optional[JsonDict]:
         rows = self.read(
             model,
@@ -504,6 +509,7 @@ class DatabaseFactory:
             no_cache=no_cache,
             include_deleted=include_deleted,
             engine_override=engine_override,
+            session_vars=session_vars,
         )
         return rows[0] if rows else None
 
@@ -520,6 +526,7 @@ class DatabaseFactory:
         etag: Optional[str] = None,
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         name = _model_name(model)
         meta = _extract_meta(model)
@@ -536,6 +543,7 @@ class DatabaseFactory:
             no_cache=True,
             include_deleted=True,
             engine_override=engine_override,
+            session_vars=session_vars,
         )
         after_plain = None
         success = False
@@ -544,7 +552,7 @@ class DatabaseFactory:
         def _op() -> JsonDict:
             nonlocal after_plain, success
             if self._is_sql(meta, engine_override):
-                result = adapters.sql.update(meta.table, entity_id, data)
+                result = adapters.sql.update(meta.table, entity_id, data, session_vars=session_vars)
             else:
                 # A scalar entity_id is usually the record's "id" property,
                 # not its physical PartitionKey/RowKey — those come from the
@@ -635,6 +643,7 @@ class DatabaseFactory:
         *,
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         name = _model_name(model)
         meta = _extract_meta(model)
@@ -652,7 +661,7 @@ class DatabaseFactory:
         def _op() -> JsonDict:
             nonlocal after_plain, success
             if self._is_sql(meta, engine_override):
-                result = adapters.sql.upsert(meta.table, data)
+                result = adapters.sql.upsert(meta.table, data, session_vars=session_vars)
             else:
                 cls = (
                     model
@@ -696,6 +705,7 @@ class DatabaseFactory:
         etag: Optional[str] = None,
         hard: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> JsonDict:
         meta = _extract_meta(model)
         name = _model_name(model)
@@ -709,6 +719,7 @@ class DatabaseFactory:
                     "deleted_by": AuditContext.actor_id.get(),
                 },
                 engine_override=engine_override,
+                session_vars=session_vars,
             )
 
         adapters = self._adapters_for(model, meta, engine_override)
@@ -718,6 +729,7 @@ class DatabaseFactory:
             no_cache=True,
             include_deleted=True,
             engine_override=engine_override,
+            session_vars=session_vars,
         )
         success = False
         error: Optional[str] = None
@@ -725,7 +737,7 @@ class DatabaseFactory:
         def _op() -> JsonDict:
             nonlocal success
             if self._is_sql(meta, engine_override):
-                result = adapters.sql.delete(meta.table, entity_id)
+                result = adapters.sql.delete(meta.table, entity_id, session_vars=session_vars)
             else:
                 cls = (
                     model
