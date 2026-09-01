@@ -43,6 +43,23 @@ class VercelKVAdapter(NoSQLKVAdapter):
         if self.kv_url.startswith("redis://"):
             self._redis = redis.from_url(self.kv_url, decode_responses=True)
 
+    def _table_name(self, model: type) -> str:
+        """Same convention DynamoDBAdapter/_table_name and
+        FirestoreAdapter/_collection_name already use -- but here it's not
+        optional. Unlike DynamoDB (a real per-model table) or Firestore (a
+        real per-model collection), Vercel KV/Redis is one flat keyspace: a
+        key that was just "{pk}:{rk}" (tenant_id:id) let two different
+        models sharing a tenant_id and, coincidentally, the same id
+        collide on the exact same physical key -- one model's create
+        silently overwriting an unrelated model's row. Reproduced directly:
+        a "notes" row and a "widgets" row both keyed "tenant-a:x1" and the
+        second create clobbered the first. Folding the table name into the
+        key is the fix; every _*_raw method below must use this, not the
+        bare "{pk}:{rk}" shape.
+        """
+        meta = getattr(model, "__polydb__", {})
+        return meta.get("table") or meta.get("collection") or model.__name__.lower()
+
     # ------------------------------------------------------------------
     # PUT
     # ------------------------------------------------------------------
@@ -51,7 +68,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
 
-            key = f"{pk}:{rk}"
+            key = f"{self._table_name(model)}:{pk}:{rk}"
 
             payload = dict(data)
             payload["_pk"] = pk
@@ -97,7 +114,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
 
         try:
 
-            key = f"{pk}:{rk}"
+            key = f"{self._table_name(model)}:{pk}:{rk}"
 
             # LOCAL REDIS
             if self._redis:
@@ -149,11 +166,12 @@ class VercelKVAdapter(NoSQLKVAdapter):
         try:
 
             results: List[JsonDict] = []
+            table = self._table_name(model)
 
             # LOCAL REDIS
             if self._redis:
 
-                for key in self._redis.scan_iter("*"):
+                for key in self._redis.scan_iter(f"{table}:*"):
 
                     value: Any = self._redis.get(key)
 
@@ -182,7 +200,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
             import requests
 
             resp = requests.get(
-                f"{self.kv_url}/keys/*",
+                f"{self.kv_url}/keys/{table}:*",
                 headers={"Authorization": f"Bearer {self.kv_token}"},
                 timeout=self.timeout,
             )
@@ -244,7 +262,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
 
         try:
 
-            key = f"{pk}:{rk}"
+            key = f"{self._table_name(model)}:{pk}:{rk}"
 
             # LOCAL REDIS
             if self._redis:
