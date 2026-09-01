@@ -1042,3 +1042,67 @@ class DatabaseFactory:
             self._cache.invalidate(model, key)
         else:
             self._cache.clear()
+
+    # ------------------------------------------------------------------
+    # Generic Redis KV -- distinct from set_cache/get_cache/invalidate_cache
+    # above (which back the automatic, best-effort query-result cache and
+    # degrade silently with no Redis configured). These back a caller's
+    # own explicit business logic reached from outside this class (e.g. a
+    # manifest workflow step's "redis" integration doing rate limiting or
+    # a distributed lock), so a missing/misconfigured cache backend raises
+    # CacheError instead of returning a silently-wrong 0/None/False.
+    # ------------------------------------------------------------------
+
+    def redis_get(self, key: str, *, namespace: str = "generic") -> Optional[Any]:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        return self._cache.get_raw(namespace, key)
+
+    def redis_set(
+        self, key: str, value: Any, *, namespace: str = "generic", ttl: Optional[int] = None
+    ) -> bool:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        return self._cache.set_raw(namespace, key, value, ttl)
+
+    def redis_delete(self, key: str, *, namespace: str = "generic") -> None:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        self._cache.delete_key(namespace, key)
+
+    def redis_incr(self, key: str, *, namespace: str = "generic", amount: int = 1) -> int:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        return self._cache.incrby(namespace, key, amount)
+
+    def redis_decr(self, key: str, *, namespace: str = "generic", amount: int = 1) -> int:
+        return self.redis_incr(key, namespace=namespace, amount=-amount)
+
+    def redis_exists(self, key: str, *, namespace: str = "generic") -> bool:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        return self._cache.exists_raw(namespace, key)
+
+    def redis_ttl(self, key: str, *, namespace: str = "generic") -> int:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        return self._cache.ttl_raw(namespace, key)
+
+    def redis_expire(self, key: str, ttl: int, *, namespace: str = "generic") -> None:
+        from .errors import CacheError
+
+        if not self._cache:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        self._cache.expire_key(namespace, key, ttl)

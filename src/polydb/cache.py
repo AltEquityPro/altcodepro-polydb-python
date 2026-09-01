@@ -204,6 +204,96 @@ class RedisCacheEngine:
         except Exception:
             pass
 
+    # ---------------------------------------------------------
+    # Generic raw KV operations -- for a caller that wants a plain
+    # Redis get/set/incr under an explicit key it picked itself, not the
+    # query-result caching get()/set() above (which hash a query dict
+    # into the key). Reuses the same _make_raw_key (no hashing) as the
+    # zset methods above, so a raw KV key and a zset key never collide
+    # as long as the caller doesn't reuse the same `key` for both.
+    #
+    # Unlike get()/set()/invalidate() above -- which are an *automatic*,
+    # best-effort read-through cache where a Redis hiccup or missing
+    # backend should never break the underlying query -- these raw
+    # methods back a caller's own explicit business logic (e.g. a
+    # workflow step doing rate limiting or a distributed lock via
+    # incrby()). Silently returning None/0/False there would hide a real
+    # misconfiguration (no REDIS_CACHE_URL set) behind wrong-looking
+    # business results instead of a clear error, so these raise
+    # CacheError when no client is configured or the operation itself
+    # fails, rather than swallowing the exception.
+    # ---------------------------------------------------------
+
+    def get_raw(self, model: str, key: str) -> Optional[Any]:
+        from .errors import CacheError
+
+        if not self._client:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        redis_key = self._make_raw_key(model, key)
+        try:
+            data = self._client.get(redis_key)
+            if data is None:
+                return None
+            if isinstance(data, bytes):
+                data = data.decode("utf-8")
+            return json.loads(data)
+        except Exception as e:
+            raise CacheError(f"Redis get failed: {e}")
+
+    def set_raw(self, model: str, key: str, value: Any, ttl: Optional[int] = None) -> bool:
+        from .errors import CacheError
+
+        if not self._client:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        redis_key = self._make_raw_key(model, key)
+        data = json.dumps(value, default=json_safe)
+        try:
+            if ttl:
+                self._client.setex(redis_key, ttl, data)
+            else:
+                self._client.set(redis_key, data)
+            return True
+        except Exception as e:
+            raise CacheError(f"Redis set failed: {e}")
+
+    def incrby(self, model: str, key: str, amount: int = 1) -> int:
+        """Atomic increment (INCRBY) of a raw key, creating it at 0 first
+        if absent -- the primitive a rate-limiter/counter workflow step
+        needs, distinct from the zset-based rate limiting above."""
+        from .errors import CacheError
+
+        if not self._client:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        redis_key = self._make_raw_key(model, key)
+        try:
+            return int(self._client.incrby(redis_key, amount))
+        except Exception as e:
+            raise CacheError(f"Redis incrby failed: {e}")
+
+    def exists_raw(self, model: str, key: str) -> bool:
+        from .errors import CacheError
+
+        if not self._client:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        redis_key = self._make_raw_key(model, key)
+        try:
+            return bool(self._client.exists(redis_key))
+        except Exception as e:
+            raise CacheError(f"Redis exists failed: {e}")
+
+    def ttl_raw(self, model: str, key: str) -> int:
+        """Seconds until expiry; -1 means the key exists with no TTL, -2
+        means the key doesn't exist -- standard Redis TTL semantics."""
+        from .errors import CacheError
+
+        if not self._client:
+            raise CacheError("No Redis cache backend configured (set REDIS_CACHE_URL/REDIS_URL)")
+        redis_key = self._make_raw_key(model, key)
+        try:
+            return int(self._client.ttl(redis_key))
+        except Exception as e:
+            raise CacheError(f"Redis ttl failed: {e}")
+
 
 class CacheWarmer:
     """Pre-populate cache with frequently accessed data"""
