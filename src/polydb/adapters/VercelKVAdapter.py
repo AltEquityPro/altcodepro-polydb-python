@@ -56,7 +56,15 @@ class VercelKVAdapter(NoSQLKVAdapter):
             payload = dict(data)
             payload["_pk"] = pk
             payload["_rk"] = rk
-            payload["id"] = pk
+            # NOTE: "id" is intentionally left as whatever the caller supplied
+            # (already present via `dict(data)` above). NoSQLKVAdapter._get_pk_rk
+            # derives `rk` from data.get(rk_field, ...) with rk_field defaulting
+            # to "id" -- i.e. the write-side convention is that a model's "id"
+            # field means "row key", not partition key. Overwriting it with
+            # `pk` here corrupted the caller's own id field and made it
+            # inconsistent with the read-side lookups below, which key on the
+            # record's real "id" value rather than the partition key.
+            payload.setdefault("id", rk)
 
             value = json.dumps(payload, default=json_safe)
 
@@ -100,7 +108,6 @@ class VercelKVAdapter(NoSQLKVAdapter):
                     return None
 
                 obj = json.loads(value)
-                obj.setdefault("id", obj.get("_pk"))
                 return obj
 
             # REST API
@@ -121,7 +128,6 @@ class VercelKVAdapter(NoSQLKVAdapter):
                 return None
 
             obj = json.loads(result)
-            obj.setdefault("id", obj.get("_pk"))
 
             return obj
 
@@ -160,17 +166,11 @@ class VercelKVAdapter(NoSQLKVAdapter):
 
                     for k, v in filters.items():
 
-                        if k == "id":
-                            if obj.get("_pk") != v:
-                                match = False
-                                break
-
-                        elif obj.get(k) != v:
+                        if obj.get(k) != v:
                             match = False
                             break
 
                     if match:
-                        obj.setdefault("id", obj.get("_pk"))
                         results.append(obj)
 
                     if limit and len(results) >= limit:
@@ -217,17 +217,11 @@ class VercelKVAdapter(NoSQLKVAdapter):
 
                 for k, v in filters.items():
 
-                    if k == "id":
-                        if obj.get("_pk") != v:
-                            match = False
-                            break
-
-                    elif obj.get(k) != v:
+                    if obj.get(k) != v:
                         match = False
                         break
 
                 if match:
-                    obj.setdefault("id", obj.get("_pk"))
                     results.append(obj)
 
             return results
@@ -260,7 +254,9 @@ class VercelKVAdapter(NoSQLKVAdapter):
 
                 self._redis.delete(key)
 
-                return {"id": pk}
+                # "id" means row key throughout this adapter (see _put_raw) --
+                # return rk, not pk, for consistency.
+                return {"id": rk}
 
             # REST API
             import requests
@@ -280,7 +276,7 @@ class VercelKVAdapter(NoSQLKVAdapter):
                 timeout=self.timeout,
             ).raise_for_status()
 
-            return {"id": pk}
+            return {"id": rk}
 
         except DatabaseError:
             raise

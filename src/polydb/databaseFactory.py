@@ -68,9 +68,9 @@ def _parse_unique_violation_columns(exc: BaseException) -> list:
     return [c.strip() for c in m.group(1).split(",") if c.strip()]
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════
 # ENGINE CONFIG
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════
 
 
 @dataclass
@@ -114,9 +114,9 @@ class _ResolvedAdapters:
     engine_name: str
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════════════
 # MODEL META RESOLUTION (lightweight — no registry enforcement)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════════════
 
 
 def _extract_meta(model: Union[type, str]) -> ModelMeta:
@@ -140,9 +140,9 @@ def _model_name(model: Union[type, str]) -> str:
     return model.__name__ if isinstance(model, type) else str(model)
 
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ════════════════════════════════════════════════════════════════════════════════════
 # DATABASE FACTORY
-# ═══════════════════════════════════════════════════════════════════════════════
+# ═══════════════════════════════════════════════════════════════════════════════════
 
 
 class DatabaseFactory:
@@ -226,16 +226,16 @@ class DatabaseFactory:
         self._engine_by_name: Dict[str, EngineConfig] = {e.name: e for e in self._engines}
         self._provider_name = self._engines[0].cloud_factory.provider.value
 
-    # ────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
     # ENGINE ROUTING
-    # ────────────────────────────────────────────────────────────────────
+    # ─────────────────────────────────────────────────────────────
 
     def _resolve_adapters(
         self, model_name: str, storage: str, override: Optional[EngineOverride] = None
     ) -> _ResolvedAdapters:
         # Only construct the adapter this call actually needs. Every caller
         # (create/read/update/upsert/delete/query*) branches on `storage` and
-        # touches exactly one of .sql/.nosql — building both unconditionally
+        # touches exactly one of .sql/.nosql -- building both unconditionally
         # meant a purely-SQL deployment with no reachable NoSQL backend (or
         # vice versa) failed on every single call, not just ones that needed
         # the missing engine.
@@ -280,9 +280,9 @@ class DatabaseFactory:
             storage = "sql" if (meta.storage == "sql" and meta.table) else "nosql"
         return self._resolve_adapters(name, storage, override)
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # ENGINE MANAGEMENT
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def register_engine(self, engine: EngineConfig) -> None:
         if engine.name in self._engine_by_name:
@@ -315,9 +315,9 @@ class DatabaseFactory:
                 return e.nosql()
         return self._engines[0].nosql()
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # HELPERS
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def _inject_audit_fields(self, data: JsonDict, is_create: bool = False) -> JsonDict:
         data = dict(data)
@@ -349,9 +349,9 @@ class DatabaseFactory:
             return False
         return meta.storage == "sql" and bool(meta.table)
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # CREATE
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def create(
         self,
@@ -427,9 +427,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # READ
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def read(
         self,
@@ -507,9 +507,9 @@ class DatabaseFactory:
         )
         return rows[0] if rows else None
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # UPDATE
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def update(
         self,
@@ -564,6 +564,7 @@ class DatabaseFactory:
                         before.get("PartitionKey")
                         or before.get("partition_key")
                         or before.get("pk")
+                        or before.get("_pk")
                         or (before.get(meta.pk_field) if meta.pk_field else None)
                     )
                 rkey = None
@@ -623,9 +624,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # UPSERT
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def upsert(
         self,
@@ -683,9 +684,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # DELETE
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def delete(
         self,
@@ -735,18 +736,36 @@ class DatabaseFactory:
                 # scalar entity_id alone isn't enough once a model's pk_field
                 # /rk_field differ from "id").
                 en_id = entity_id
-                if not isinstance(en_id, dict) and before:
+                if before:
                     pkey = (
                         before.get("PartitionKey")
                         or before.get("partition_key")
                         or before.get("pk")
+                        or before.get("_pk")
                         or (before.get(meta.pk_field) if meta.pk_field else None)
                     )
                     if pkey:
                         rkey = None
                         if meta.rk_field and meta.rk_field != "id":
                             rkey = before.get(meta.rk_field)
-                        en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
+                        if isinstance(en_id, dict):
+                            en_pk = (
+                                en_id.get("PartitionKey")
+                                or en_id.get("partition_key")
+                                or en_id.get("pk")
+                            )
+                            if not en_pk:
+                                en_id["partition_key"] = pkey
+                            en_rk = (
+                                en_id.get("RowKey")
+                                or en_id.get("row_key")
+                                or en_id.get("rk")
+                                or en_id.get("id")
+                            )
+                            if not en_rk and rkey:
+                                en_id["row_key"] = rkey
+                        else:
+                            en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
                 result = adapters.nosql.delete(cls, en_id, etag=etag)
             success = True
             if self._enable_cache and self._cache:
@@ -769,9 +788,9 @@ class DatabaseFactory:
         except Exception:
             raise
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # QUERY (LINQ-style)
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def query_linq(
         self,
@@ -803,9 +822,9 @@ class DatabaseFactory:
                 return result
         return self._run(_op)
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # PAGINATION (legacy simple)
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def read_page(
         self,
@@ -852,9 +871,9 @@ class DatabaseFactory:
                 return result
         return self._run(_op)
 
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
     # PAGINATION (generic — order_by, cursor, field projection)
-    # ────────────────────────────────────────────────────────────────────
+    # ──────────────────────────────────────────────────────────
 
     def query_paged(
         self,
@@ -883,9 +902,9 @@ class DatabaseFactory:
         )
         return adapters.nosql.query_paged(cls, request)
 
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════════════════
     # BLOB STORAGE
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════════
 
     def upload_blob(
         self,
@@ -934,9 +953,9 @@ class DatabaseFactory:
         )
         return storage.list(prefix)
 
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════════════════
     # QUEUE
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════════
 
     def send_queue(
         self,
@@ -983,9 +1002,9 @@ class DatabaseFactory:
             else queue.delete(message_id, queue_name)
         )
 
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════════════════
     # FILE STORAGE
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════════
 
     def write_file(
         self, path: str, data: Union[bytes, str], *, adapter_name: str = "files"
@@ -1005,9 +1024,9 @@ class DatabaseFactory:
         files = self._engines[0].cloud_factory.get_files(adapter_name)
         return files.list(directory)
 
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ════════════════════════════════════════════════════════════════════════════════════
     # CACHE
-    # ═══════════════════════════════════════════════════════════════════════════════
+    # ═══════════════════════════════════════════════════════════════════════════════════
 
     def set_cache(self, model: str, key: Any, value: Any, ttl: int = 300) -> None:
         if self._cache:
