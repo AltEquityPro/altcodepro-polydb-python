@@ -47,6 +47,14 @@ class AWSSecretsManagerAdapter(SecretsAdapter):
     def delete_secret(self, key: str) -> bool:
         from botocore.exceptions import ClientError
 
+        # Real AWS raises ResourceNotFoundException for deleting a missing
+        # secret, but at least one mock (moto) returns a synthetic success
+        # response instead of raising -- checking existence explicitly
+        # first makes this return value correct regardless of what a given
+        # backend/mock does on delete of something that was never there.
+        if self.get_secret(key) is None:
+            return False
+
         try:
             self._client.delete_secret(SecretId=key, ForceDeleteWithoutRecovery=True)
             return True
