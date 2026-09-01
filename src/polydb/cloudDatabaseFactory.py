@@ -6,17 +6,17 @@ from typing import Dict, List, Optional
 
 from .base import SharedFilesAdapter
 
-from .adapters.AzureFileStorageAdapter import AzureFileStorageAdapter
-from .adapters.EFSAdapter import EFSAdapter
-from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
-from .adapters.AzureBlobStorageAdapter import AzureBlobStorageAdapter
-from .adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
-from .adapters.GCPStorageAdapter import GCPStorageAdapter
-from .adapters.S3CompatibleAdapter import S3CompatibleAdapter
-from .adapters.VercelBlobAdapter import VercelBlobAdapter
-
+# Deliberately NOT importing adapter classes at module level (they used to
+# be, redundantly -- every branch below already does its own lazy, local
+# `from .adapters.XAdapter import XAdapter` at the point of use, and
+# `from __future__ import annotations` above means the return-type hints
+# don't need a real import either). The top-level imports served no
+# purpose except forcing every cloud SDK to be installed just to
+# `import polydb` at all -- found by actually trying a minimal install.
 from .models import (
+    AWSSecretsManagerConfig,
     AzureFileConfig,
+    AzureKeyVaultConfig,
     AzureQueueConfig,
     AzureStorageConfig,
     AzureTableConfig,
@@ -29,22 +29,19 @@ from .models import (
     FirestoreConfig,
     GCPFileConfig,
     GCPPubSubConfig,
+    GCPSecretManagerConfig,
     GCPStorageConfig,
     MongoConfig,
     PartitionConfig,
     PostgreSQLConfig,
     SQSAdapterConfig,
     StorageConfig,
+    VaultConfig,
     VercelKVConfig,
     VercelQueueConfig,
     VercelStorageConfig,
 )
 from .utils import setup_logger
-from .adapters.AzureQueueAdapter import AzureQueueAdapter
-from .adapters.GCPPubSubAdapter import GCPPubSubAdapter
-from .adapters.VercelQueueAdapter import VercelQueueAdapter
-from .adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
-from .adapters.SQSAdapter import SQSAdapter
 
 # ============================================================
 # FACTORY
@@ -100,6 +97,11 @@ class CloudDatabaseFactory:
             return CloudProvider.GCP
         if os.getenv("VERCEL_ENV"):
             return CloudProvider.VERCEL
+        # README documents MONGODB_URI as a detection signal; the check was
+        # missing here entirely, so it silently fell through to Postgres
+        # instead (found by running the package's own test suite).
+        if os.getenv("MONGODB_URI"):
+            return CloudProvider.MONGODB
 
         return CloudProvider.POSTGRESQL
 
@@ -368,6 +370,7 @@ class CloudDatabaseFactory:
                 cfg = StorageConfig(provider=self.provider, name=name)
 
             if cfg.provider == CloudProvider.AZURE:
+                from .adapters.AzureQueueAdapter import AzureQueueAdapter
 
                 connection_string = None
                 if isinstance(cfg, AzureQueueConfig):
@@ -391,6 +394,7 @@ class CloudDatabaseFactory:
                 )
 
             elif cfg.provider == CloudProvider.GCP:
+                from .adapters.GCPPubSubAdapter import GCPPubSubAdapter
 
                 topic = None
                 project_id = ""
@@ -404,6 +408,7 @@ class CloudDatabaseFactory:
                 )
 
             elif cfg.provider == CloudProvider.VERCEL:
+                from .adapters.VercelQueueAdapter import VercelQueueAdapter
 
                 url = ""
                 token = ""
@@ -413,6 +418,7 @@ class CloudDatabaseFactory:
                 instance = VercelQueueAdapter(url or "", token or "")
 
             elif cfg.provider == CloudProvider.BLOCKCHAIN:
+                from .adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
 
                 rpc_url = ""
                 private_key = ""
@@ -489,4 +495,55 @@ class CloudDatabaseFactory:
                 raise NotImplementedError(f"File storage not supported for {cfg.provider.value}")
 
             self.instances[name] = instance
+            return instance
+
+    # --------------------------------------------------------
+    # SECRETS
+    # --------------------------------------------------------
+    def get_secrets(self, name: str = "secrets"):
+        """Cloud-agnostic secrets: Azure Key Vault / AWS Secrets Manager /
+        GCP Secret Manager / HashiCorp Vault (self-hosted), dispatched the
+        same way as every other adapter type. Unlike the data adapters,
+        this deliberately does NOT fall back to self.provider by default --
+        a factory configured for provider=postgresql or provider=mongodb
+        has no secrets manager of its own, so an unconfigured/unrecognized
+        provider here falls back to Vault (self-hosted, cloud-agnostic)
+        rather than raising."""
+        with self._lock:
+            cache_key = f"secrets::{name}"
+            if cache_key in self.instances:
+                return self.instances[cache_key]
+
+            cfg = self.configs.get(name)
+            provider = cfg.provider if cfg else self.provider
+
+            if provider == CloudProvider.AZURE:
+                from .adapters.AzureKeyVaultAdapter import AzureKeyVaultAdapter
+
+                vault_url = cfg.vault_url if isinstance(cfg, AzureKeyVaultConfig) else None
+                instance = AzureKeyVaultAdapter(vault_url=vault_url or "")
+
+            elif provider == CloudProvider.AWS:
+                from .adapters.AWSSecretsManagerAdapter import AWSSecretsManagerAdapter
+
+                region = cfg.region if isinstance(cfg, AWSSecretsManagerConfig) else None
+                instance = AWSSecretsManagerAdapter(region=region or "")
+
+            elif provider == CloudProvider.GCP:
+                from .adapters.GCPSecretManagerAdapter import GCPSecretManagerAdapter
+
+                project_id = cfg.project_id if isinstance(cfg, GCPSecretManagerConfig) else None
+                instance = GCPSecretManagerAdapter(project_id=project_id or "")
+
+            else:
+                from .adapters.VaultAdapter import VaultAdapter
+
+                url, token, mount_point = None, None, "secret"
+                if isinstance(cfg, VaultConfig):
+                    url, token, mount_point = cfg.url, cfg.token, cfg.mount_point
+                instance = VaultAdapter(
+                    url=url or "", token=token or "", mount_point=mount_point
+                )
+
+            self.instances[cache_key] = instance
             return instance

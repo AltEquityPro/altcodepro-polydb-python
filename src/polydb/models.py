@@ -19,6 +19,7 @@ class CloudProvider(Enum):
     S3_COMPATIBLE = "s3_compatible"
     POSTGRESQL = "postgresql"
     BLOCKCHAIN = "blockchain"
+    VAULT = "vault"
 
 
 @dataclass
@@ -84,6 +85,38 @@ class StorageConfig:
     def __init__(self, provider: CloudProvider, name: str = "default"):
         self.provider = provider
         self.name = name
+
+
+class AzureKeyVaultConfig(StorageConfig):
+    def __init__(self, name: str = "secrets", vault_url: Optional[str] = None):
+        super().__init__(CloudProvider.AZURE, name)
+        self.vault_url = vault_url
+
+
+class AWSSecretsManagerConfig(StorageConfig):
+    def __init__(self, name: str = "secrets", region: Optional[str] = None):
+        super().__init__(CloudProvider.AWS, name)
+        self.region = region
+
+
+class GCPSecretManagerConfig(StorageConfig):
+    def __init__(self, name: str = "secrets", project_id: Optional[str] = None):
+        super().__init__(CloudProvider.GCP, name)
+        self.project_id = project_id
+
+
+class VaultConfig(StorageConfig):
+    def __init__(
+        self,
+        name: str = "secrets",
+        url: Optional[str] = None,
+        token: Optional[str] = None,
+        mount_point: str = "secret",
+    ):
+        super().__init__(CloudProvider.VAULT, name)
+        self.url = url
+        self.token = token
+        self.mount_point = mount_point
 
 
 class AzureStorageConfig(StorageConfig):
