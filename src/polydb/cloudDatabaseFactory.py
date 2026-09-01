@@ -498,7 +498,7 @@ class CloudDatabaseFactory:
                     f"Queue adapter is not supported for {self.provider.value}"
                 )
 
-            self.instances["queue"] = instance
+            self.instances[name] = instance
             return instance
 
     def get_files(self, name: str = "files"):

@@ -191,3 +191,30 @@ class TestRabbitMQFactoryWiring:
         received = queue.receive(queue_name=qname, max_messages=1)
         assert received[0]["id"] == msg_id
         assert queue.ack(received[0]["receipt_handle"], queue_name=qname) is True
+
+    def test_get_queue_returns_the_same_cached_instance_across_calls(self):
+        # A real bug, found by exercising send/receive/ack through
+        # CloudDatabaseFactory.get_queue() end to end (universal_engine's
+        # queue.call connector, not this file directly): get_queue()'s
+        # instance cache used to be written as
+        # `self.instances["queue"] = instance` -- a hardcoded literal key,
+        # not `self.instances[name]`. The read side correctly checked
+        # `if name in self.instances`, so with the write always landing
+        # under "queue" instead, that check was never true for any real
+        # adapter name ("rabbitmq", "kafka", "vercel_queue", ...) --
+        # every single get_queue(name) call quietly built a brand new
+        # adapter instance instead of reusing one. That's invisible for
+        # an adapter whose state lives entirely in the external service
+        # (VercelQueueAdapter's local-redis mode, SQS, ...), but
+        # RabbitMQAdapter/KafkaQueueAdapter track pending delivery
+        # tags/offsets in `self._pending` on the *instance itself* --
+        # receive() on instance A followed by ack() on a fresh instance B
+        # (same name, same broker) found nothing to ack and silently
+        # returned False instead of acking the real message.
+        factory = CloudDatabaseFactory(
+            provider=CloudProvider.RABBITMQ,
+            storage_configs=[RabbitMQConfig(name="rabbitmq")],
+        )
+        first = factory.get_queue("rabbitmq")
+        second = factory.get_queue("rabbitmq")
+        assert first is second
