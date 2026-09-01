@@ -20,6 +20,8 @@ class CloudProvider(Enum):
     POSTGRESQL = "postgresql"
     BLOCKCHAIN = "blockchain"
     VAULT = "vault"
+    KAFKA = "kafka"
+    RABBITMQ = "rabbitmq"
 
 
 @dataclass
@@ -201,6 +203,48 @@ class VercelQueueConfig(StorageConfig):
         super().__init__(CloudProvider.VERCEL, name)
         self.token = token
         self.url = url
+
+
+class KafkaQueueConfig(StorageConfig):
+    def __init__(
+        self,
+        name: str = "kafka_queue",
+        bootstrap_servers: str = "",
+        group_id: str = "",
+        security_protocol: str = "",
+        sasl_mechanism: Optional[str] = None,
+        sasl_plain_username: Optional[str] = None,
+        sasl_plain_password: Optional[str] = None,
+        ssl_cafile: Optional[str] = None,
+    ):
+        super().__init__(CloudProvider.KAFKA, name)
+        self.bootstrap_servers = bootstrap_servers
+        self.group_id = group_id
+        self.security_protocol = security_protocol
+        self.sasl_mechanism = sasl_mechanism
+        self.sasl_plain_username = sasl_plain_username
+        self.sasl_plain_password = sasl_plain_password
+        self.ssl_cafile = ssl_cafile
+
+
+class RabbitMQConfig(StorageConfig):
+    def __init__(
+        self,
+        name: str = "rabbitmq",
+        url: str = "",
+        host: str = "",
+        port: int = 0,
+        username: str = "",
+        password: str = "",
+        virtual_host: str = "",
+    ):
+        super().__init__(CloudProvider.RABBITMQ, name)
+        self.url = url
+        self.host = host
+        self.port = port
+        self.username = username
+        self.password = password
+        self.virtual_host = virtual_host
 
 
 class BlockchainStorageConfig(StorageConfig):

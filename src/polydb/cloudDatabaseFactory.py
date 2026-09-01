@@ -31,9 +31,11 @@ from .models import (
     GCPPubSubConfig,
     GCPSecretManagerConfig,
     GCPStorageConfig,
+    KafkaQueueConfig,
     MongoConfig,
     PartitionConfig,
     PostgreSQLConfig,
+    RabbitMQConfig,
     SQSAdapterConfig,
     StorageConfig,
     VaultConfig,
@@ -360,6 +362,8 @@ class CloudDatabaseFactory:
         | GCPPubSubAdapter
         | VercelQueueAdapter
         | BlockchainQueueAdapter
+        | KafkaQueueAdapter
+        | RabbitMQAdapter
     ):
         with self._lock:
             if name in self.instances:
@@ -434,6 +438,59 @@ class CloudDatabaseFactory:
                     private_key=private_key,
                     contract_address=contract_address,
                     contract_abi=contract_abi,
+                )
+
+            elif cfg.provider == CloudProvider.KAFKA:
+                from .adapters.KafkaQueueAdapter import KafkaQueueAdapter
+
+                bootstrap_servers = ""
+                group_id = ""
+                security_protocol = ""
+                sasl_mechanism = None
+                sasl_plain_username = None
+                sasl_plain_password = None
+                ssl_cafile = None
+                if isinstance(cfg, KafkaQueueConfig):
+                    bootstrap_servers = cfg.bootstrap_servers
+                    group_id = cfg.group_id
+                    security_protocol = cfg.security_protocol
+                    sasl_mechanism = cfg.sasl_mechanism
+                    sasl_plain_username = cfg.sasl_plain_username
+                    sasl_plain_password = cfg.sasl_plain_password
+                    ssl_cafile = cfg.ssl_cafile
+                instance = KafkaQueueAdapter(
+                    bootstrap_servers=bootstrap_servers or "",
+                    group_id=group_id or "",
+                    security_protocol=security_protocol or "",
+                    sasl_mechanism=sasl_mechanism or "",
+                    sasl_plain_username=sasl_plain_username or "",
+                    sasl_plain_password=sasl_plain_password or "",
+                    ssl_cafile=ssl_cafile or "",
+                )
+
+            elif cfg.provider == CloudProvider.RABBITMQ:
+                from .adapters.RabbitMQAdapter import RabbitMQAdapter
+
+                url = ""
+                host = ""
+                port = 0
+                username = ""
+                password = ""
+                virtual_host = ""
+                if isinstance(cfg, RabbitMQConfig):
+                    url = cfg.url
+                    host = cfg.host
+                    port = cfg.port
+                    username = cfg.username
+                    password = cfg.password
+                    virtual_host = cfg.virtual_host
+                instance = RabbitMQAdapter(
+                    url=url or "",
+                    host=host or "",
+                    port=port or 0,
+                    username=username or "",
+                    password=password or "",
+                    virtual_host=virtual_host or "",
                 )
 
             else:
