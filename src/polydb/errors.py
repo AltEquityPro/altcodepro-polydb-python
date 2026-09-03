@@ -41,6 +41,12 @@ class ConnectionError(CloudDBError):
     pass
 
 
+class CacheError(CloudDBError):
+    """Cache/Redis operation failed, or no cache backend is configured"""
+
+    pass
+
+
 class ValidationError(CloudDBError):
     """Input validation failed"""
 

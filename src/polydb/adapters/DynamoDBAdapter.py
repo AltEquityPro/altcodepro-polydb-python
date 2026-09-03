@@ -23,10 +23,12 @@ class DynamoDBAdapter(NoSQLKVAdapter):
     Production-grade DynamoDB adapter with optional S3 overflow.
 
     Goals (matches your adapter test style)
-    - stored row keeps "id" == pk
-    - query({"id": ...}) works
+    - stored row keeps "id" == rk (the row key -- see NoSQLKVAdapter._get_pk_rk,
+      which derives rk from data.get(rk_field, ...) with rk_field defaulting
+      to "id"); put() returns the full stored record, not just {"id": ...}
+    - query({"id": ...}) works (matches the record's own "id"/rk, not PK)
     - patch() merges (handled by NoSQLKVAdapter.patch)
-    - delete() returns {"id": <pk>} and raises sqlite3.DatabaseError on missing
+    - delete() returns {"id": <rk>} and raises sqlite3.DatabaseError on missing
     - query_page() uses DynamoDB LastEvaluatedKey token (stable)
     - LocalStack support (endpoint_url) + auto create table/bucket in test/dev
     """
@@ -273,16 +275,24 @@ class DynamoDBAdapter(NoSQLKVAdapter):
             payload["PK"] = pk
             payload["SK"] = rk
 
-            # Ensure "id" field exists for tests/querying
-            payload.setdefault("id", pk)
+            # "id" is the row key (NoSQLKVAdapter._get_pk_rk derives `rk` from
+            # data.get(rk_field, ...) with rk_field defaulting to "id"), so it
+            # is already present in `payload` via dict(data) above whenever the
+            # caller supplied one. Only fall back to `rk` -- never `pk`, which
+            # would silently collide every row in the same partition onto the
+            # same "id" and break id-addressed lookups (query/get/patch/delete
+            # by {"id": ...}), the same corruption previously present here and
+            # in VercelKVAdapter.
+            payload.setdefault("id", rk)
             payload.setdefault("_pk", pk)
             payload.setdefault("_rk", rk)
 
             ref = self._maybe_overflow_to_s3(model, pk, rk, payload)
             table.put_item(Item=ref if ref is not None else payload)
 
-            # ✅ match pattern: put returns {"id": pk}
-            return {"id": pk}
+            # Return the full stored record, not just {"id": pk} -- callers
+            # (e.g. DatabaseFactory.create()) use this as the created row.
+            return payload
 
         except Exception as e:
             raise NoSQLError(f"DynamoDB put failed: {e}")
@@ -297,7 +307,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
             if not item:
                 return None
 
-            item.setdefault("id", pk)
+            item.setdefault("id", rk)
             return self._resolve_overflow(item)
 
         except Exception as e:
@@ -318,8 +328,11 @@ class DynamoDBAdapter(NoSQLKVAdapter):
             table = self._get_table(model)
             filters = filters or {}
 
-            # Treat 'id' as PK by convention (since we store PK=pk=id in NoSQLKVAdapter by default)
-            pk_value = filters.get("PK") or filters.get("partition_key") or filters.get("id")
+            # "id" is the row key by convention (see _put_raw), not the
+            # partition key -- only route to Query when the caller names the
+            # actual PK explicitly. A bare {"id": ...} filter falls through to
+            # Scan below with "id" applied as a normal attribute filter.
+            pk_value = filters.get("PK") or filters.get("partition_key")
 
             if pk_value is not None:
                 key_cond = Key("PK").eq(str(pk_value))
@@ -330,7 +343,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
 
                 # Other filters as FilterExpression
                 other = {
-                    k: v for k, v in filters.items() if k not in ("PK", "SK", "partition_key", "id")
+                    k: v for k, v in filters.items() if k not in ("PK", "SK", "partition_key")
                 }
                 if other:
                     expr = None
@@ -361,7 +374,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
 
             out: List[JsonDict] = []
             for it in items:
-                it.setdefault("id", it.get("_pk") or it.get("PK"))
+                it.setdefault("id", it.get("_rk") or it.get("SK"))
                 out.append(self._resolve_overflow(it))
             return out
 
@@ -392,7 +405,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
                         pass
 
             table.delete_item(Key={"PK": pk, "SK": rk})
-            return {"id": pk}
+            return {"id": rk}
 
         except DatabaseError:
             raise
@@ -427,7 +440,9 @@ class DynamoDBAdapter(NoSQLKVAdapter):
 
             start_key = self._decode_token(continuation_token) if continuation_token else None
 
-            pk_value = query.get("PK") or query.get("partition_key") or query.get("id")
+            # "id" is the row key by convention, not the partition key --
+            # see _query_raw.
+            pk_value = query.get("PK") or query.get("partition_key")
 
             items: List[JsonDict] = []
             last_key = start_key
@@ -448,7 +463,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
                     kwargs["ExclusiveStartKey"] = last_key
 
                 other_filters = {
-                    k: v for k, v in query.items() if k not in ("PK", "SK", "partition_key", "id")
+                    k: v for k, v in query.items() if k not in ("PK", "SK", "partition_key")
                 }
 
                 if other_filters:
@@ -501,7 +516,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
             out: List[JsonDict] = []
 
             for it in items:
-                it.setdefault("id", it.get("_pk") or it.get("PK"))
+                it.setdefault("id", it.get("_rk") or it.get("SK"))
                 out.append(self._resolve_overflow(it))
 
             next_tok = self._encode_token(last_key) if last_key else None

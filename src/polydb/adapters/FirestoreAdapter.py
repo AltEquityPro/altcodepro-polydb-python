@@ -25,11 +25,20 @@ class FirestoreAdapter(NoSQLKVAdapter):
     Production-grade Firestore adapter with optional GCS overflow.
 
     Goals (matches your tests)
-    - Document id == pk (so querying {"id": ...} works)
+    - stored row keeps "id" == rk (the row key -- see NoSQLKVAdapter._get_pk_rk,
+      which derives rk from data.get(rk_field, ...) with rk_field defaulting
+      to "id"), so querying {"id": ...} matches the record's own id
     - patch() merges (preserves existing fields)
-    - delete() returns {"id": <pk>} and raises DatabaseError on missing
+    - delete() returns {"id": <rk>} and raises DatabaseError on missing
     - query_page() returns (rows, token) with stable pagination
     - Emulator support via FIRESTORE_EMULATOR_HOST
+
+    NOTE: the Firestore *document id* is still `pk` alone (see _doc_id) --
+    this adapter does not compose pk+rk into the physical document key the
+    way VercelKVAdapter/DynamoDBAdapter do. That is a pre-existing, separate
+    design constraint (two rows sharing the same pk collide onto one
+    document) left as-is here since fixing it is a bigger structural change
+    this pass didn't verify against a live Firestore/emulator.
 
     NOTE: google-cloud-firestore / google-cloud-storage are imported lazily
     inside the methods that use them, so installing them is only required when
@@ -118,7 +127,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
         return self._client.collection(self._collection_name(model))
 
     def _doc_id(self, pk: str) -> str:
-        # IMPORTANT for tests: doc_id == pk == row["id"]
+        # Document id is the partition key alone (not composed with rk).
         return str(pk)
 
     def _blob_key(self, model: type, pk: str, rk: str, checksum: str) -> str:
@@ -148,7 +157,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
         blob.upload_from_string(data_bytes)
 
         ref: JsonDict = {
-            "id": pk,
+            "id": rk,
             "_pk": pk,
             "_rk": rk,
             "_overflow": True,
@@ -203,9 +212,15 @@ class FirestoreAdapter(NoSQLKVAdapter):
             collection = self._get_collection(model)
             doc_id = self._doc_id(pk)
 
-            # Ensure required identifiers exist for tests and convenience
+            # "id" is the row key (see NoSQLKVAdapter._get_pk_rk, which derives
+            # rk from data.get(rk_field, ...) with rk_field defaulting to "id").
+            # It is already present in `payload` via dict(data) above whenever
+            # the caller supplied one -- only fall back to `rk`, never `pk`,
+            # which would silently collapse every row's "id" to its partition
+            # key and break id-addressed lookups (the same corruption
+            # previously present here and in VercelKVAdapter/DynamoDBAdapter).
             payload: JsonDict = dict(data or {})
-            payload["id"] = pk
+            payload.setdefault("id", rk)
             payload["_pk"] = pk
             payload["_rk"] = rk
 
@@ -215,7 +230,8 @@ class FirestoreAdapter(NoSQLKVAdapter):
             else:
                 collection.document(doc_id).set(payload)
 
-            return {"id": pk}
+            # Return the full stored record, not just {"id": pk}.
+            return overflow_ref if overflow_ref is not None else payload
 
         except Exception as e:
             raise NoSQLError(f"Firestore put failed: {e}")
@@ -231,7 +247,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
                 return None
 
             doc_data = snap.to_dict() or {}
-            doc_data.setdefault("id", pk)
+            doc_data.setdefault("id", rk)
 
             return self._resolve_overflow(doc_data)
 
@@ -275,8 +291,9 @@ class FirestoreAdapter(NoSQLKVAdapter):
             out: List[JsonDict] = []
             for d in docs:
                 row = d.to_dict() or {}
-                # Ensure id present for tests
-                row.setdefault("id", row.get("_pk") or d.id)
+                # Fall back to the row key, not the partition key, when "id"
+                # is absent from the stored document (legacy/incomplete data).
+                row.setdefault("id", row.get("_rk") or d.id)
                 out.append(self._resolve_overflow(row))
             return out
 
@@ -288,7 +305,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
         """
         Test expectations:
         - deleting nonexistent raises sqlite3.DatabaseError
-        - delete returns {"id": pk}
+        - delete returns {"id": rk}
         - deletes overflow blob if present
         """
         try:
@@ -311,7 +328,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
                         pass
 
             collection.document(doc_id).delete()
-            return {"id": pk}
+            return {"id": rk}
 
         except DatabaseError:
             raise
@@ -355,7 +372,7 @@ class FirestoreAdapter(NoSQLKVAdapter):
             rows: List[JsonDict] = []
             for d in docs:
                 row = d.to_dict() or {}
-                row.setdefault("id", row.get("_pk") or d.id)
+                row.setdefault("id", row.get("_rk") or d.id)
                 rows.append(self._resolve_overflow(row))
 
             next_token = None

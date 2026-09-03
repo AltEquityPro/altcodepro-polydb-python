@@ -190,18 +190,63 @@ Supported systems:
 * AWS SQS
 * Azure Queue
 * Google Pub/Sub
-* Vercel Queue
+* Vercel Queue (cloud REST API, or a plain local `redis://` URL for
+  dev/test)
+* Kafka
+* RabbitMQ
 * Blockchain event queues
 
-Example:
+Example (method names below match `QueueAdapter`'s actual signatures —
+`send`/`receive`/`ack`/`delete`, not `send_message`/`receive_message`):
 
 ```python
-queue = factory.get_queue()
+queue = factory.get_queue("rabbitmq")
 
-queue.send_message("jobs", {"task": "process"})
-msg = queue.receive_message("jobs")
-queue.delete_message("jobs", msg)
+message_id = queue.send({"task": "process"}, queue_name="jobs")
+messages = queue.receive(queue_name="jobs", max_messages=1)
+queue.ack(messages[0]["receipt_handle"], queue_name="jobs")
 ```
+
+## Extended queue management (`nack`/`purge`/`declare`/`status`)
+
+`QueueAdapter`'s base class also defines `nack`, `purge`, `declare`
+(explicit provisioning ahead of first use, with optional dead-letter
+queue wiring), and `status` — regular (non-abstract) base methods that
+raise `NotImplementedError` by default, overridden only where a
+subclass genuinely implements them. Honest status, verified against a
+real local broker/client, not assumed:
+
+* **RabbitMQAdapter** — all four implemented for real against a live
+  broker: `nack` is `basic_nack(requeue=True)` (immediate redelivery,
+  not dead-lettering); `purge` reads the real purged count off
+  `queue_purge`'s `Queue.PurgeOk` response; `declare` wires real AMQP
+  dead-lettering (`x-dead-letter-exchange`/`x-dead-letter-routing-key`
+  queue arguments — not a hand-rolled shadow re-router) when
+  `dead_letter_queue` is given, and `status` reads `message_count`/
+  `consumer_count` off a passive `queue_declare`. A message only
+  actually gets dead-lettered by a real reject-without-requeue
+  (`basic_nack`/`basic_reject` with `requeue=False`) or a TTL/
+  max-length policy — `nack()`'s own contract is "redeliver now", so it
+  deliberately does **not** trigger dead-lettering itself. `dlq_list`/
+  `dlq_replay` aren't separate adapter methods — they're just
+  `receive`/`send`+`ack` aimed at the DLQ's own queue name.
+* **KafkaQueueAdapter** — only `nack` is implemented, and it's a
+  documented no-op: `receive()` already never commits an offset until
+  `ack()`/`delete()` does, so a received-but-unacked message is already
+  effectively "nacked". `purge`/`declare`/`status` are **not**
+  implemented — not practical against `kafka-python`'s client-level API
+  without broker admin tooling; they raise the base class's
+  `NotImplementedError`.
+* **SQS / Azure Queue / GCP Pub/Sub / Blockchain** — none of the four
+  new methods are implemented; all raise the base class's
+  `NotImplementedError`. No credentials/emulator for any of these three
+  cloud providers, and no real blockchain node, were available where
+  this was built and tested.
+* **Vercel Queue (local-redis mode)** — also not implemented for these
+  four, though flagged as a real, likely-tractable gap for later: Redis
+  Streams' `XPENDING`/`XCLAIM`/`XTRIM` could plausibly back `nack`/
+  `status`/`purge` for the local-redis mode specifically. Deliberately
+  left out of this round rather than half-implemented.
 
 ---
 
