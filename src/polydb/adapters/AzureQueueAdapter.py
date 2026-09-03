@@ -116,10 +116,31 @@ class AzureQueueAdapter(QueueAdapter):
     # a still-in-flight message was becoming visible again and getting
     # picked up by a second worker mid-processing: two concurrent
     # executions of the same task, one of which stomps/duplicates the
-    # other's result. 300s covers realistic worst-case processing; ack()
-    # deletes the message immediately on completion regardless; a genuinely
-    # crashed worker still recovers the message after this timeout.
-    DEFAULT_VISIBILITY_TIMEOUT = 300
+    # other's result. ack() deletes the message immediately on completion
+    # regardless; a genuinely crashed worker recovers it after this timeout.
+    #
+    # This MUST be >= the longest a consumer may legitimately hold a message.
+    # It was 300s while the platform's durable tasks are allowed 3600s
+    # (execution/durable_job.py: timeout_seconds=3600.0), so every task that
+    # ran longer than five minutes was redelivered WHILE STILL RUNNING -- and
+    # again at ten, at fifteen, each redelivery starting another concurrent
+    # execution of the same job. Observed on an artifact generation run: the
+    # second invocation found the first's per-artifact lock held, recorded the
+    # artifact as `already_running`, and carried on to the next one, so the
+    # first artifact sat at `running` forever while its dependents blocked on
+    # it. CPU pegged, RSS climbed with every duplicate, and the process was
+    # eventually OOM-killed. The de-duplication guard upstream could not save
+    # it: a redelivery carries the SAME run id as the original, so nothing in
+    # the payload distinguishes them.
+    #
+    # Matched to the durable task timeout deliberately: the queue must not
+    # reclaim a message the executor is still allowed to be working on. The
+    # cost is that a hard worker crash now leaves the message invisible for up
+    # to an hour before recovery, which is the right trade -- a delayed retry
+    # is recoverable, two concurrent runs mutating the same rows are not.
+    DEFAULT_VISIBILITY_TIMEOUT = int(
+        os.environ.get("POLYDB_QUEUE_VISIBILITY_TIMEOUT") or 3600
+    )
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
     def receive(
