@@ -164,9 +164,7 @@ class RabbitMQAdapter(QueueAdapter):
             out: List[Dict[str, Any]] = []
 
             for _ in range(max_messages):
-                method, properties, body = self._channel.basic_get(
-                    queue=queue_name, auto_ack=False
-                )
+                method, properties, body = self._channel.basic_get(queue=queue_name, auto_ack=False)
                 if method is None:
                     break  # queue is (currently) empty
 
@@ -314,6 +312,143 @@ class RabbitMQAdapter(QueueAdapter):
             }
         except Exception as e:
             raise QueueError(f"RabbitMQ status failed: {e}")
+
+    # ---------------------------------------------------------
+    # delay / cancel -- real, plugin-free AMQP TTL + dead-letter-exchange
+    # pattern. extend() is NOT overridden: AMQP's ack/nack/reject model
+    # has no per-message renewable visibility timer at all, so the base
+    # class's NotImplementedError is the honest answer.
+    # ---------------------------------------------------------
+
+    # Bound on how many messages a single cancel() scan will basic_get
+    # through looking for the target message_id, so an adversarial or
+    # just very full delay queue can't make one cancel() call block
+    # (or nack-and-requeue-into-a-loop) indefinitely.
+    MAX_CANCEL_SCAN = 10_000
+
+    @staticmethod
+    def _delay_queue_name(queue_name: str, delay_seconds: int) -> str:
+        return f"{queue_name}.delay.{delay_seconds}"
+
+    def _ensure_delay_queue(self, queue_name: str, delay_seconds: int) -> str:
+        """Declare (once) the per-duration delay queue that dead-letters
+        into the real queue_name once its own TTL elapses -- the same
+        dead-lettering mechanism declare()'s own dead_letter_queue
+        argument already uses, applied here to delay instead of
+        failure."""
+        delay_queue = self._delay_queue_name(queue_name, delay_seconds)
+        if delay_queue in self._declared_queues:
+            return delay_queue
+
+        self._channel.queue_declare(
+            queue=delay_queue,
+            durable=True,
+            arguments={
+                "x-message-ttl": delay_seconds * 1000,
+                "x-dead-letter-exchange": "",
+                "x-dead-letter-routing-key": queue_name,
+            },
+        )
+        self._declared_queues.add(delay_queue)
+        return delay_queue
+
+    @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
+    def delay(
+        self, message: Dict[str, Any], queue_name: str = "default", *, delay_seconds: int = 0
+    ) -> str:
+        """Publish to a per-duration delay queue (x-message-ttl +
+        dead-letter-exchange pointing at queue_name) so the message
+        lands there automatically once delay_seconds elapses. Returns a
+        self-generated message_id cancel() can use to remove it first,
+        the same embed-our-own-id approach send() already uses since
+        basic_publish itself returns nothing."""
+        try:
+            import pika
+
+            self._ensure_open()
+            self._ensure_queue(queue_name)
+            delay_queue = self._ensure_delay_queue(queue_name, delay_seconds)
+
+            message_id = uuid.uuid4().hex
+            body = json.dumps(message, default=json_safe).encode("utf-8")
+
+            self._channel.basic_publish(
+                exchange="",
+                routing_key=delay_queue,
+                body=body,
+                properties=pika.BasicProperties(
+                    message_id=message_id,
+                    delivery_mode=2,
+                ),
+            )
+
+            return message_id
+
+        except Exception as e:
+            raise QueueError(f"RabbitMQ delay failed: {e}")
+
+    def cancel(
+        self, message_id: str, queue_name: str = "default", *, delay_seconds: Optional[int] = None
+    ) -> bool:
+        """Remove a still-delayed message before its delay queue's own
+        TTL elapses, via a bounded scan-and-requeue of that one specific
+        per-duration delay queue: basic_get everything currently in it
+        (up to MAX_CANCEL_SCAN), basic_ack the one matching message_id
+        to drop it, basic_nack(requeue=True) every other message to keep
+        them correctly scheduled.
+
+        `delay_seconds` identifies WHICH delay queue to scan -- the same
+        value passed to the original delay() call. Without it there is
+        no way to know which per-duration queue the message is sitting
+        in, so it is required here (unlike the base contract's bare
+        `message_id`) and this override intentionally has a different,
+        wider signature than QueueAdapter.cancel's own.
+        """
+        if delay_seconds is None:
+            raise QueueError(
+                "RabbitMQAdapter.cancel requires delay_seconds (the same value passed to delay()) "
+                "to know which per-duration delay queue to scan"
+            )
+        if not message_id:
+            raise QueueError("message_id is required for RabbitMQ cancel")
+
+        try:
+            self._ensure_open()
+            delay_queue = self._ensure_delay_queue(queue_name, delay_seconds)
+
+            found = False
+            scanned = 0
+            # Two passes: first drain up to MAX_CANCEL_SCAN messages,
+            # remembering which delivery_tag (if any) matches
+            # message_id; then ack the match and nack(requeue=True)
+            # everything else, so a message that doesn't match is
+            # restored to the queue rather than lost.
+            to_requeue = []
+            match_tag = None
+
+            while scanned < self.MAX_CANCEL_SCAN:
+                method, properties, body = self._channel.basic_get(
+                    queue=delay_queue, auto_ack=False
+                )
+                if method is None:
+                    break
+                scanned += 1
+                this_id = properties.message_id if properties else None
+                if this_id == message_id and match_tag is None:
+                    match_tag = method.delivery_tag
+                    found = True
+                else:
+                    to_requeue.append(method.delivery_tag)
+
+            if match_tag is not None:
+                self._channel.basic_ack(delivery_tag=match_tag)
+            for tag in to_requeue:
+                self._channel.basic_nack(delivery_tag=tag, requeue=True)
+
+            return found
+
+        except Exception as e:
+            raise QueueError(f"RabbitMQ cancel failed: {e}")
 
     def close(self) -> None:
         """Close the channel/connection. Not part of QueueAdapter's

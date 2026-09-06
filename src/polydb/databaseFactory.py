@@ -39,6 +39,16 @@ import re as _re
 
 logger = logging.getLogger(__name__)
 
+# queue.receive/dlq_list's own max_messages had no artificial cap --
+# bounded only by real queue depth, which lets a caller-supplied
+# max_messages ask for an unbounded batch. Operator-configurable, the
+# same POLYDB_QUEUE_VISIBILITY_TIMEOUT env-var precedent
+# AzureQueueAdapter.DEFAULT_VISIBILITY_TIMEOUT already establishes --
+# config-driven, never a manifest/caller-suppliable value. A caller
+# asking for fewer than this still gets exactly what it asked for;
+# only a request above the cap is silently clamped down to it.
+QUEUE_RECEIVE_MAX_MESSAGES_CAP = int(os.environ.get("POLYDB_QUEUE_RECEIVE_MAX_MESSAGES") or 1000)
+
 _DEFAULT_RETRY = retry(
     wait=wait_exponential(multiplier=0.5, min=0.5, max=6),
     stop=stop_after_attempt(3),
@@ -393,7 +403,9 @@ class DatabaseFactory:
                         conflict_cols,
                     )
                     update_data = {k: v for k, v in data.items() if k not in conflict_cols}
-                    result = adapters.sql.update(meta.table, where, update_data, session_vars=session_vars)
+                    result = adapters.sql.update(
+                        meta.table, where, update_data, session_vars=session_vars
+                    )
             else:
                 result = adapters.nosql.put(
                     (
@@ -908,10 +920,7 @@ class DatabaseFactory:
         if self._is_sql(meta, engine_override):
             return adapters.sql.query_paged(meta.table, request)
 
-        cls = (
-            model if isinstance(model, type)
-            else type(name, (), {"__polydb__": meta.__dict__})
-        )
+        cls = model if isinstance(model, type) else type(name, (), {"__polydb__": meta.__dict__})
         return adapters.nosql.query_paged(cls, request)
 
     # ════════════════════════════════════════════════════════════════════════════════════
@@ -987,6 +996,7 @@ class DatabaseFactory:
         adapter_name: str = "azure_queue",
     ) -> List[Dict[str, Any]]:
         queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        max_messages = min(max_messages, QUEUE_RECEIVE_MAX_MESSAGES_CAP)
         return queue.receive(queue_name=queue_name, max_messages=max_messages)
 
     def ack_queue(
@@ -1040,6 +1050,50 @@ class DatabaseFactory:
     ) -> Dict[str, Any]:
         queue = self._engines[0].cloud_factory.get_queue(adapter_name)
         return queue.status(queue_name)
+
+    # extend/delay/cancel -- real only where the underlying adapter
+    # genuinely implements one (see QueueAdapter's own module comment
+    # for the full per-backend feasibility matrix). An adapter that
+    # doesn't implement a given method raises NotImplementedError by
+    # name, propagated here unchanged rather than caught and faked.
+
+    def extend_queue(
+        self,
+        ack_id: str,
+        *,
+        queue_name: str = "default",
+        visibility_timeout: int = 30,
+        adapter_name: str = "azure_queue",
+    ) -> bool:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.extend(ack_id, queue_name, visibility_timeout=visibility_timeout)
+
+    def delay_queue(
+        self,
+        message: Dict[str, Any],
+        *,
+        queue_name: str = "default",
+        delay_seconds: int = 0,
+        adapter_name: str = "azure_queue",
+    ) -> str:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        return queue.delay(message, queue_name, delay_seconds=delay_seconds)
+
+    def cancel_queue(
+        self,
+        message_id: str,
+        *,
+        queue_name: str = "default",
+        adapter_name: str = "azure_queue",
+        **kwargs: Any,
+    ) -> bool:
+        queue = self._engines[0].cloud_factory.get_queue(adapter_name)
+        # RabbitMQAdapter.cancel needs a `delay_seconds` kwarg (which
+        # per-duration delay queue to scan) that no other adapter's own
+        # cancel() takes -- passed through only when the caller supplies
+        # it, so every other adapter's plain cancel(message_id,
+        # queue_name) signature is untouched.
+        return queue.cancel(message_id, queue_name, **kwargs)
 
     # ════════════════════════════════════════════════════════════════════════════════════
     # FILE STORAGE
