@@ -237,3 +237,49 @@ class GCPPubSubAdapter(QueueAdapter):
 
         except Exception as e:
             raise QueueError(f"Pub/Sub ack failed: {e}")
+
+    # ---------------------------------------------------------
+    # extend -- real GCP Pub/Sub ModifyAckDeadline. delay()/cancel() are
+    # NOT overridden: a published Pub/Sub message is deliverable
+    # immediately (no "don't make this visible until N seconds from
+    # now" primitive exists), so the base class's NotImplementedError
+    # is the honest answer for both.
+    # ---------------------------------------------------------
+
+    # Pub/Sub's own real, documented maximum ack deadline. Google's API
+    # rejects anything above this with an invalid-argument error, so
+    # enforce it here rather than leaving callers to hit an opaque
+    # remote error.
+    MAX_ACK_DEADLINE_SECONDS = 600
+
+    @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
+    def extend(
+        self, ack_id: str, queue_name: str = "default", *, visibility_timeout: int = 30
+    ) -> bool:
+        """Real Pub/Sub ModifyAckDeadline -- ack_id is the same ack_id
+        receive() returned for this message."""
+        if not ack_id:
+            raise QueueError("ack_id is required for Pub/Sub extend")
+        if visibility_timeout > self.MAX_ACK_DEADLINE_SECONDS:
+            raise QueueError(
+                f"Pub/Sub ack deadline cannot exceed {self.MAX_ACK_DEADLINE_SECONDS}s "
+                f"(GCP's own real maximum), got {visibility_timeout}"
+            )
+        try:
+            if not self._subscriber:
+                raise ConnectionError("Pub/Sub subscriber not initialized")
+
+            _, subscription = self._resolve_names(queue_name)
+            sub_path = self._subscription_path(subscription)
+
+            self._subscriber.modify_ack_deadline(
+                request={
+                    "subscription": sub_path,
+                    "ack_ids": [ack_id],
+                    "ack_deadline_seconds": visibility_timeout,
+                }
+            )
+            return True
+
+        except Exception as e:
+            raise QueueError(f"Pub/Sub extend failed: {e}")

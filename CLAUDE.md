@@ -164,6 +164,42 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.6** — Real, per-backend `extend`/`delay`/`cancel` queue operations
+  ([QueueAdapter.py](src/polydb/base/QueueAdapter.py) base contract), implemented honestly per
+  adapter rather than faked uniformly — each backend only gets the operations its own real API
+  supports:
+  - **SQS** ([SQSAdapter.py](src/polydb/adapters/SQSAdapter.py)): `extend` via
+    `change_message_visibility`; `delay` via `send_message`'s own `DelaySeconds` (capped at SQS's
+    real 0–900s ceiling). No `cancel` — a delayed SQS message has no `ReceiptHandle` to cancel
+    with until it's actually received.
+  - **Azure Queue** ([AzureQueueAdapter.py](src/polydb/adapters/AzureQueueAdapter.py)): all three
+    real — `extend` via `update_message`, `delay` via `send_message`'s own `visibility_timeout`,
+    `cancel` via the existing `delete()` (the delay call's own returned receipt is what makes a
+    still-invisible message cancellable).
+  - **GCP Pub/Sub** ([GCPPubSubAdapter.py](src/polydb/adapters/GCPPubSubAdapter.py)): `extend`
+    only, via `modify_ack_deadline` (capped at Pub/Sub's real 600s `MAX_ACK_DEADLINE_SECONDS`). No
+    `delay`/`cancel` — Pub/Sub has no delayed-publish primitive.
+  - **RabbitMQ** ([RabbitMQAdapter.py](src/polydb/adapters/RabbitMQAdapter.py)): `delay`/`cancel`
+    via a real TTL + dead-letter-exchange pattern (`_ensure_delay_queue` declares a
+    `{queue}.delay.{seconds}` queue with `x-message-ttl`/`x-dead-letter-exchange=""`/
+    `x-dead-letter-routing-key={queue}`, so the delayed message dead-letters back into the real
+    queue once its TTL expires). No `extend` — AMQP has no renewable per-message visibility timer.
+    `cancel(message_id, queue_name, *, delay_seconds=...)` is deliberately WIDER than the base
+    `QueueAdapter` contract (an extra required keyword) because finding the right delay queue to
+    scan needs to know the original delay; it drains up to `MAX_CANCEL_SCAN` (10,000) messages via
+    bounded `basic_get`, acking the one matching `message_id` (dropping it) and nacking
+    (`requeue=True`) everything else to preserve their own scheduling.
+  - Every adapter that doesn't support an operation still raises `NotImplementedError`, named,
+    never silently no-ops or fakes success.
+  - `databaseFactory.py` gained a module-level, config-driven cap on `receive_queue`'s own
+    `max_messages` — `QUEUE_RECEIVE_MAX_MESSAGES_CAP` (env var `POLYDB_QUEUE_RECEIVE_MAX_MESSAGES`,
+    default 1000), clamped via `min(max_messages, QUEUE_RECEIVE_MAX_MESSAGES_CAP)` before the real
+    adapter call — previously unbounded, relying purely on real queue depth. Also added
+    `extend_queue`/`delay_queue`/`cancel_queue` wrapper methods on `DatabaseFactory`, following the
+    exact existing `get_queue(adapter_name).method(...)` pattern every other queue method already
+    uses; `cancel_queue` accepts `**kwargs` to conditionally forward RabbitMQ's own `delay_seconds`.
+  - Also syncs `__version__` with `pyproject.toml` (2.5.6).
+
 - **2.5.5** — Azure queue `DEFAULT_VISIBILITY_TIMEOUT` raised from 300s to 3600s and made
   overridable via `POLYDB_QUEUE_VISIBILITY_TIMEOUT`
   ([AzureQueueAdapter.py](src/polydb/adapters/AzureQueueAdapter.py)). The old 300s was shorter than

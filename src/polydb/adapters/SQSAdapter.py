@@ -180,3 +180,63 @@ class SQSAdapter(QueueAdapter):
             raise QueueError("ack_id (receipt_handle) is required for SQS ack")
 
         return self.delete(ack_id, queue_name=queue_name)
+
+    # ---------------------------------------------------------
+    # extend / delay -- real SQS primitives. cancel() is NOT
+    # overridden: a delayed SQS message has no ReceiptHandle until its
+    # own DelaySeconds elapses, so there is no API call that can remove
+    # it before then -- the base class's NotImplementedError is the
+    # honest answer, not a gap to work around.
+    # ---------------------------------------------------------
+
+    @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
+    def extend(
+        self, ack_id: str, queue_name: str = "default", *, visibility_timeout: int = 30
+    ) -> bool:
+        """Real SQS ChangeMessageVisibility -- ack_id is the same
+        receipt_handle receive() returned for this message."""
+        if not ack_id:
+            raise QueueError("ack_id (receipt_handle) is required for SQS extend")
+        try:
+            if not self._client:
+                self._initialize_client()
+
+            self._client.change_message_visibility(
+                QueueUrl=self._queue_url,
+                ReceiptHandle=ack_id,
+                VisibilityTimeout=visibility_timeout,
+            )
+            return True
+
+        except Exception as e:
+            raise QueueError(f"SQS extend failed: {e}")
+
+    @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
+    def delay(
+        self, message: Dict[str, Any], queue_name: str = "default", *, delay_seconds: int = 0
+    ) -> str:
+        """Real SQS SendMessage DelaySeconds -- SQS itself caps this at
+        900 seconds (15 minutes), enforced here rather than left to an
+        opaque API error."""
+        if not (0 <= delay_seconds <= 900):
+            raise QueueError(
+                f"SQS delay_seconds must be between 0 and 900 (SQS's own real ceiling), got {delay_seconds}"
+            )
+        try:
+            if not self._client:
+                self._initialize_client()
+
+            body = (
+                json.dumps(message, default=json_safe) if not isinstance(message, str) else message
+            )
+
+            resp = self._client.send_message(
+                QueueUrl=self._queue_url,
+                MessageBody=body,
+                DelaySeconds=delay_seconds,
+            )
+
+            return resp["MessageId"]
+
+        except Exception as e:
+            raise QueueError(f"SQS delay failed: {e}")

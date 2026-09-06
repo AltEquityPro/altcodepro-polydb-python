@@ -138,9 +138,7 @@ class AzureQueueAdapter(QueueAdapter):
     # cost is that a hard worker crash now leaves the message invisible for up
     # to an hour before recovery, which is the right trade -- a delayed retry
     # is recoverable, two concurrent runs mutating the same rows are not.
-    DEFAULT_VISIBILITY_TIMEOUT = int(
-        os.environ.get("POLYDB_QUEUE_VISIBILITY_TIMEOUT") or 3600
-    )
+    DEFAULT_VISIBILITY_TIMEOUT = int(os.environ.get("POLYDB_QUEUE_VISIBILITY_TIMEOUT") or 3600)
 
     @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
     def receive(
@@ -274,3 +272,62 @@ class AzureQueueAdapter(QueueAdapter):
             return True
         except Exception as e:
             raise QueueError(f"Azure Queue nack failed: {e}")
+
+    # ---------------------------------------------------------
+    # extend / delay / cancel -- all three real on Azure Queue.
+    # ---------------------------------------------------------
+
+    def extend(
+        self, ack_id: str, queue_name: str = "default", *, visibility_timeout: int = 30
+    ) -> bool:
+        """Real Azure UpdateMessage call extending visibility without
+        touching the stored body -- ack_id is the combined
+        "<message_id>|<pop_receipt>" receipt_handle receive() returned."""
+        message_id, pop_receipt = self._decode_receipt(ack_id)
+        if not message_id:
+            raise QueueError("AzureQueueAdapter.extend requires a receipt_handle from receive()")
+        try:
+            queue_name = self._normalize_queue_name(queue_name)
+            queue_client = self._get_queue(queue_name)
+            # No `content=` argument: this is the SDK's own documented
+            # way to leave the stored message body unchanged while only
+            # updating visibility_timeout.
+            queue_client.update_message(
+                message_id,
+                pop_receipt=pop_receipt,
+                visibility_timeout=visibility_timeout,
+            )
+            return True
+        except Exception as e:
+            raise QueueError(f"Azure Queue extend failed: {e}")
+
+    @retry(max_attempts=3, delay=1.0, exceptions=(QueueError,))
+    def delay(
+        self, message: Dict[str, Any], queue_name: str = "default", *, delay_seconds: int = 0
+    ) -> str:
+        """Real Azure send_message with its own visibility_timeout param
+        -- the message is stored immediately but not deliverable until
+        delay_seconds elapses. Returns the combined receipt (packed via
+        _encode_receipt) so cancel() has enough to delete it before then."""
+        try:
+            queue_name = self._normalize_queue_name(queue_name)
+            queue_client = self._get_queue(queue_name)
+
+            response = queue_client.send_message(
+                json.dumps(message, default=json_safe),
+                visibility_timeout=delay_seconds,
+            )
+
+            return self._encode_receipt(response.id, response.pop_receipt)
+
+        except Exception as e:
+            raise QueueError(f"Azure Queue delay failed: {e}")
+
+    def cancel(self, message_id: str, queue_name: str = "default") -> bool:
+        """Cancel a still-delayed message before its visibility_timeout
+        elapses. message_id is the combined receipt delay() returned."""
+        decoded_id, pop_receipt = self._decode_receipt(message_id)
+        if not decoded_id:
+            raise QueueError("AzureQueueAdapter.cancel requires the receipt delay() returned")
+        queue_name = self._normalize_queue_name(queue_name)
+        return self.delete(message_id=decoded_id, queue_name=queue_name, pop_receipt=pop_receipt)
