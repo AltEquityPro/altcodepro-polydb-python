@@ -164,6 +164,36 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.8** — Fixed a real, reproduced shared-Azure-table bug in
+  [`AzureTableStorageAdapter._get_table_name()`](src/polydb/adapters/AzureTableStorageAdapter.py):
+  the method's fallback chain checked, in order, `model.__udl_definition__.x_metadata`'s
+  `collection_name`, then `model.__polydb__`'s `collection`/`collection_name` — but **never**
+  `model.__polydb__["table"]`, even though this repo's own CLAUDE.md (and every prior changelog
+  entry) documents `__polydb__` as carrying `storage`, `table`/`collection`, `pk_field`, `rk_field`,
+  ... as the two interchangeable naming keys. `altcodepro-universal-interprter`'s own
+  `compiler.py:build_model_registry()` stamps every synthesized model's metadata using the key
+  `"table"` (`"table": model.name.lower()`), never `"collection"` — so on Azure Table Storage,
+  every single NoSQL model compiled from a manifest fell through this method's entire chain and
+  landed on the same hardcoded `AZURE_TABLE_NAME` env var default (`"defaulttable"` when unset).
+  The practical effect: an app with dozens of distinct NoSQL models (e.g. `users`,
+  `subscriptions`, `sessions`, ...) had every one of their rows physically colliding into one
+  single shared Azure table, relying entirely on PartitionKey/RowKey uniqueness across unrelated
+  models to avoid overwriting each other — a much more severe, silent failure mode than the
+  already-fixed 2.5.7 PK/RK bug, and a distinct, independently-layered problem (which physical
+  *table* a model's rows live in, vs. which *PartitionKey/RowKey* they use within that table).
+  Fixed by adding `polydb_meta.get("table")` as a third fallback alongside `collection`/
+  `collection_name` (checked in the same `polydb_meta` branch, after the two existing keys, before
+  the env-var default) — so a compiler-synthesized model carrying `__polydb__["table"]` now
+  resolves to its own distinct, correctly-named physical table instead of falling through to the
+  shared default. Reproduced before trusting the fix: a bare adapter instance's `_get_table_name()`
+  called against two model stand-ins carrying only `__polydb__["table"]` (`"users"`/
+  `"subscriptions"`, no `collection`/`collection_name`/`__udl_definition__` at all — exactly the
+  shape `build_model_registry()` produces) both resolved to the single literal `"defaulttable"`
+  before this fix and to their own correct, distinct table names (`"users"`/`"subscriptions"`)
+  after it. Backwards compatible: any model already relying on `collection`/`collection_name`
+  (or `__udl_definition__.x_metadata.collection_name`) is completely unaffected, since those two
+  checks still run first and unconditionally win over `table` when present.
+
 - **2.5.7** — Fixed a real, reproduced bug in `DatabaseFactory.update()`/`delete()`'s NoSQL
   physical-key recovery ([databaseFactory.py](src/polydb/databaseFactory.py)): for the
   overwhelmingly common case where a model declares **no** explicit `pk_field`/`rk_field`

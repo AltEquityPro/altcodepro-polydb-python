@@ -404,7 +404,11 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         polydb_meta = getattr(model, "__polydb__", None)
         if isinstance(polydb_meta, dict):
-            collection = polydb_meta.get("collection") or polydb_meta.get("collection_name")
+            collection = (
+                polydb_meta.get("collection")
+                or polydb_meta.get("collection_name")
+                or polydb_meta.get("table")
+            )
             if collection:
                 return self._sanitize_table_name(str(collection))
 
