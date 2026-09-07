@@ -164,6 +164,38 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.7** — Fixed a real, reproduced bug in `DatabaseFactory.update()`/`delete()`'s NoSQL
+  physical-key recovery ([databaseFactory.py](src/polydb/databaseFactory.py)): for the
+  overwhelmingly common case where a model declares **no** explicit `pk_field`/`rk_field`
+  (`meta.pk_field is None`), both methods' own PartitionKey recovery gave up entirely instead of
+  falling back to `NoSQLKVAdapter`'s own real default (`"tenant_id"`/`"id"`, per
+  `_pk_rk_field_names`'s own docstring) — leaving `pkey` as `None`. That `None` then reached
+  `NoSQLKVAdapter.patch()`/`.delete()`'s own dict-shaped `entity_id` branch (which only recognizes
+  `partition_key`/`pk`, never `tenant_id`), so `pk` stayed `None` there too, got `str()`-coerced to
+  the literal string `"None"` by `AzureTableStorageAdapter._sanitize_pk_rk`, and both methods
+  silently operated on a **phantom row** at `PartitionKey="None"` instead of the real one —
+  `update()` wrote a brand-new, non-merged row (losing every other field, and returning
+  `{"tenant_id": "None", ...}` as a literal string to the caller) while the real row was never
+  found (`existing = self._get_raw(model, None, rk)` → `ResourceNotFound`) and therefore never
+  updated at all; `delete()` had the identical shape of bug and would delete nothing. Fixed by
+  resolving against `meta.pk_field or "tenant_id"` / `meta.rk_field or "id"` (matching the
+  adapter's own real default exactly, never treating an unset `pk_field` as "nothing to recover")
+  and by also checking the `entity_id` dict itself (the caller's own already-resolved value, e.g.
+  `core_db.py`'s `db_update` passing `{"id": ..., "tenant_id": ctx.tenant_id}`) before falling back
+  to a re-read of `before` — more direct and equally authoritative. Reproduced end to end before
+  trusting the fix, per this repo's own standard: a fake Azure-shaped NoSQL adapter (stripping
+  `PartitionKey`/`RowKey` and remapping to `tenant_id`/`id` on every read, exactly like
+  `AzureTableStorageAdapter._unpack_entity`) confirmed the pre-fix code produces the exact reported
+  symptom (`update()`'s own return value literally `{"tenant_id": "None", ...}`, a second phantom
+  row at `PartitionKey="None"` alongside the real one, the real row never receiving the patched
+  field) and that the fix removes it entirely (single row, correctly merged, `delete()` removes the
+  real row with none left behind). This is the root cause of a downstream engine-level symptom: a
+  `universal-interprter` workflow's `core.db.update` on a default-tier (no declared `pk_field`)
+  NoSQL model — e.g. `link_default_sub` setting `default_subscription_id` on a freshly-created
+  `users` row during signup — silently updated a phantom row instead of the real one, so a
+  subsequent `core.db.read` of that same row (e.g. `login_password`'s `find_user`) never saw the
+  field that was supposedly just written.
+
 - **2.5.6** — Real, per-backend `extend`/`delay`/`cancel` queue operations
   ([QueueAdapter.py](src/polydb/base/QueueAdapter.py) base contract), implemented honestly per
   adapter rather than faked uniformly — each backend only gets the operations its own real API
