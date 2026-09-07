@@ -576,21 +576,40 @@ class DatabaseFactory:
                 # `before`, so a plain id-addressed update() still lands on
                 # the entity's real physical key instead of a mismatched
                 # default partition / the id used as a row key it never had.
+                #
+                # meta.pk_field is None for the overwhelming majority of
+                # models (nothing declares an explicit partition/sort key) —
+                # that does NOT mean there's no partition key to recover, it
+                # means the adapter's own real default applies instead
+                # (NoSQLKVAdapter._get_pk_rk/_pk_rk_field_names: "tenant_id"
+                # / "id"). Resolving against meta.pk_field alone and giving
+                # up when it's unset silently produced pkey=None here, which
+                # patch()'s own dict-shaped entity_id branch has no fallback
+                # for either — the combination wrote every default-tier
+                # update to a bogus PartitionKey="None" row instead of the
+                # real one. Also check entity_id itself first (the caller's
+                # own already-resolved tenant/partition value, e.g.
+                # core_db.py's db_update passing {"id":..., "tenant_id":...})
+                # — it's more direct and just as authoritative as `before`.
+                pk_field_name = meta.pk_field or "tenant_id"
+                rk_field_name = meta.rk_field or "id"
                 pkey = data.get("PartitionKey") or data.get("partition_key") or data.get("pk")
-                if not pkey and meta.pk_field:
-                    pkey = data.get(meta.pk_field)
+                if not pkey:
+                    pkey = data.get(pk_field_name)
+                if not pkey and isinstance(entity_id, dict):
+                    pkey = entity_id.get(pk_field_name)
                 if not pkey and before:
                     pkey = (
                         before.get("PartitionKey")
                         or before.get("partition_key")
                         or before.get("pk")
                         or before.get("_pk")
-                        or (before.get(meta.pk_field) if meta.pk_field else None)
+                        or before.get(pk_field_name)
                     )
                 rkey = None
-                if meta.rk_field and meta.rk_field != "id":
-                    rkey = data.get(meta.rk_field) or (
-                        before.get(meta.rk_field) if before else None
+                if rk_field_name != "id":
+                    rkey = data.get(rk_field_name) or (
+                        before.get(rk_field_name) if before else None
                     )
                 en_id = entity_id
                 if pkey:
@@ -758,38 +777,45 @@ class DatabaseFactory:
                 )
                 # Same physical-key recovery as update() (see there for why a
                 # scalar entity_id alone isn't enough once a model's pk_field
-                # /rk_field differ from "id").
+                # /rk_field differ from "id", and why meta.pk_field being
+                # unset must fall back to the adapter's own real default
+                # ("tenant_id"/"id"), never a silent no-op).
+                pk_field_name = meta.pk_field or "tenant_id"
+                rk_field_name = meta.rk_field or "id"
                 en_id = entity_id
-                if before:
+                pkey = None
+                if isinstance(entity_id, dict):
+                    pkey = entity_id.get(pk_field_name)
+                if not pkey and before:
                     pkey = (
                         before.get("PartitionKey")
                         or before.get("partition_key")
                         or before.get("pk")
                         or before.get("_pk")
-                        or (before.get(meta.pk_field) if meta.pk_field else None)
+                        or before.get(pk_field_name)
                     )
-                    if pkey:
-                        rkey = None
-                        if meta.rk_field and meta.rk_field != "id":
-                            rkey = before.get(meta.rk_field)
-                        if isinstance(en_id, dict):
-                            en_pk = (
-                                en_id.get("PartitionKey")
-                                or en_id.get("partition_key")
-                                or en_id.get("pk")
-                            )
-                            if not en_pk:
-                                en_id["partition_key"] = pkey
-                            en_rk = (
-                                en_id.get("RowKey")
-                                or en_id.get("row_key")
-                                or en_id.get("rk")
-                                or en_id.get("id")
-                            )
-                            if not en_rk and rkey:
-                                en_id["row_key"] = rkey
-                        else:
-                            en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
+                if pkey:
+                    rkey = None
+                    if rk_field_name != "id":
+                        rkey = before.get(rk_field_name) if before else None
+                    if isinstance(en_id, dict):
+                        en_pk = (
+                            en_id.get("PartitionKey")
+                            or en_id.get("partition_key")
+                            or en_id.get("pk")
+                        )
+                        if not en_pk:
+                            en_id["partition_key"] = pkey
+                        en_rk = (
+                            en_id.get("RowKey")
+                            or en_id.get("row_key")
+                            or en_id.get("rk")
+                            or en_id.get("id")
+                        )
+                        if not en_rk and rkey:
+                            en_id["row_key"] = rkey
+                    else:
+                        en_id = {"partition_key": pkey, "row_key": rkey or entity_id}
                 result = adapters.nosql.delete(cls, en_id, etag=etag)
             success = True
             if self._enable_cache and self._cache:
