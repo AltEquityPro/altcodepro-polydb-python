@@ -493,6 +493,33 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
+            # Persist "id" as a REAL, queryable property whenever the
+            # caller's own data didn't already supply one -- not just
+            # synthesized onto this call's own return value below
+            # (`restored["id"] = safe_rk`), which only ever helped the
+            # ONE caller holding that return value. _query_raw already
+            # does the equivalent synthesis on the READ side (`out["id"]
+            # = ent_dict["RowKey"]` when absent) for a query's own
+            # results, but that can't fix a *filtered* read: a later
+            # `read_one(model, {"id": X, ...})` -- the ordinary
+            # id-addressed lookup every `update()`/`patch()` call makes
+            # for its own "before" read -- builds a real OData `id eq
+            # 'X'` filter against whatever property is actually named
+            # "id" on the stored entity. When the original create's own
+            # data never included one (true for essentially any model
+            # whose caller doesn't explicitly generate an id, default
+            # pk_field/rk_field or a custom mapping alike), that property
+            # never existed, so the filter matched nothing -- `before`
+            # came back None, and DatabaseFactory.update()'s own pk/rk
+            # recovery (see this file's own 2.5.7 changelog entry for the
+            # closely related bug) had nothing to recover from, falling
+            # through to a literal `str(None) == "None"` PartitionKey.
+            # Reproduced directly before this fix, not assumed: a create
+            # with no "id" in its own payload, followed by
+            # read_one(model, {"id": <the id the create call itself
+            # returned>}), always returned None.
+            if "id" not in data:
+                data = {**data, "id": safe_rk}
             entity = self._pack_entity(model, safe_pk, safe_rk, data)
             MAX_PROPERTY_CHARS = 30 * 1024
 
