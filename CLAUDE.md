@@ -164,6 +164,42 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.9** — Fixed a real, reproduced bug in
+  [`AzureTableStorageAdapter._put_raw()`](src/polydb/adapters/AzureTableStorageAdapter.py): a
+  create whose own write payload had no `"id"` key never landed a real, queryable `"id"` property
+  on the stored entity — `_put_raw()` only ever *synthesized* one onto that one call's own return
+  value (`restored["id"] = safe_rk`), never persisted it. This silently broke every later
+  id-addressed lookup for such a row: `DatabaseFactory.update()`/`patch()`'s own "before" read
+  (`read_one(model, {"id": X, ...})`, the ordinary path every `core.db.update` call in the
+  reference engine goes through) builds a real OData `id eq 'X'` filter against whatever property
+  is actually named `"id"` on the entity — and since that property never existed, the filter
+  matched nothing, `before` came back `None`, and `update()`'s own pk/rk recovery logic (already
+  hardened once in 2.5.7 for the "no declared pk_field" case) had nothing left to recover from,
+  falling all the way through to a literal `str(None) == "None"` PartitionKey — the identical
+  phantom-row symptom 2.5.7 fixed for a different trigger, now reproduced for a genuinely new one.
+  This affects **any** model whose caller doesn't explicitly set `"id"` at create time, not just
+  one with a custom `pk_field`/`rk_field` mapping — a downstream, real-world case:
+  `altcodepro-blueprint-engine`'s own `users` model was just given a deterministic
+  `pk_field=rk_field="identity_key"` (to fix a separate, previously-reported duplicate-row bug —
+  the same real email/phone now upserts onto one physical row instead of minting a fresh one every
+  signup), and its own `signup_password`/`verify_otp_email`/`verify_otp_phone` workflows'
+  `link_default_sub`/`link_default_sub_if_new` steps (`core.db.update(model='users', id=
+  steps.create_user.id, ...)`) hit exactly this gap the very first time they ran against a real
+  deployment — confirmed directly against a real Azure Table dump: every real user row had a
+  second, phantom sibling at `PartitionKey="None"`. Fixed by having `_put_raw()` stamp
+  `data["id"] = safe_rk` onto the payload it actually persists (mirroring `_query_raw()`'s own
+  read-side synthesis, `out["id"] = ent_dict["RowKey"]` when absent, but on the WRITE side, which
+  that function alone could never fix) whenever the caller's own data doesn't already supply one —
+  a create that already sets `"id"` itself is left completely untouched. Reproduced before
+  trusting the fix, per this repo's own standard: a real, filter-evaluating fake `TableClient`
+  (`tests/test_azure_table_id_property_persisted.py`) confirms the pre-fix code never lands a real
+  `"id"` property (a `KeyError` on the stored entity, not just a failed downstream lookup) and that
+  a subsequent `read_one`-shaped `id`-filtered query always returns nothing; the fix closes both,
+  proves two different real users' rows never collide, and proves a *repeat* `_put_raw()` call for
+  the identical deterministic key genuinely upserts the one physical row rather than minting a
+  second — the actual, originally-reported symptom this whole chain of fixes (2.5.7 → 2.5.8 →
+  2.5.9) exists to close.
+
 - **2.5.8** — Fixed a real, reproduced shared-Azure-table bug in
   [`AzureTableStorageAdapter._get_table_name()`](src/polydb/adapters/AzureTableStorageAdapter.py):
   the method's fallback chain checked, in order, `model.__udl_definition__.x_metadata`'s
