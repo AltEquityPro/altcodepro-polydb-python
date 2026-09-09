@@ -566,7 +566,26 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             table_client.upsert_entity(reference_entity)
 
             restored = self._unpack_entity(model, entity)
-            restored["id"] = safe_rk
+            # Mirror the write-side condition above (line ~521): only
+            # synthesize "id" onto the return value when the caller's own
+            # data didn't already supply one. Unconditionally overwriting
+            # it with safe_rk here was a real, reproduced bug -- whenever
+            # the caller's own id needed RowKey sanitization (contains a
+            # character Azure forbids in a RowKey: ':', ' ', '#', '?',
+            # '/', '\'), the PERSISTED "id" property kept the caller's
+            # original, unsanitized value (data["id"], written untouched
+            # via reference_entity above) while this return value handed
+            # back the sanitized safe_rk instead -- two different strings
+            # for the same row. Any caller holding onto that return
+            # value's own "id" (e.g. building a follow-up
+            # read_one(model, {"id": ...}) call, or an id.map() over a
+            # create_many result) would then filter for a value that
+            # never matches any real stored "id" property, silently
+            # getting nothing back. Reproduced directly before this fix:
+            # data={"id": "a:b"} on a model with a rk_field whose value
+            # contains ":" persisted "id"="a:b" but returned "id"="a_b".
+            if "id" not in data:
+                restored["id"] = safe_rk
 
             return restored
 
