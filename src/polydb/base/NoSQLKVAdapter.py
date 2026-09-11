@@ -5,14 +5,12 @@ import base64
 import hashlib
 import json
 import threading
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING, cast
-
-
-from ..json_safe import json_safe
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union, cast
 
 from ..errors import NoSQLError, StorageError
+from ..json_safe import json_safe
+from ..query import Operator, QueryBuilder
 from ..retry import retry
-from ..query import QueryBuilder, Operator
 from ..types import JsonDict, Lookup
 
 if TYPE_CHECKING:
@@ -234,7 +232,8 @@ class NoSQLKVAdapter:
     # Protocol implementation
     def put(self, model: type, data: JsonDict) -> JsonDict:
         pk, rk = self._get_pk_rk(model, data)
-        return self._put_raw(model, pk, rk, data)
+        store_data, _ = self._check_overflow(data)
+        return self._put_raw(model, pk, rk, store_data)
 
     def query(
         self,
@@ -342,6 +341,7 @@ class NoSQLKVAdapter:
     @property
     def capabilities(self) -> "BackendCapabilities":
         from ..models import BackendCapabilities
+
         return BackendCapabilities()
 
     def _encode_cursor(self, data: dict) -> str:
@@ -378,14 +378,16 @@ class NoSQLKVAdapter:
 
         has_more = len(results) > request.limit
         if has_more:
-            results = results[:request.limit]
+            results = results[: request.limit]
 
         next_cursor = None
         if has_more:
-            next_cursor = self._encode_cursor({
-                "offset": offset + request.limit,
-                "order_by": request.order_by,
-                "desc": request.order_desc,
-            })
+            next_cursor = self._encode_cursor(
+                {
+                    "offset": offset + request.limit,
+                    "order_by": request.order_by,
+                    "desc": request.order_desc,
+                }
+            )
 
         return PageResult(items=results, next_cursor=next_cursor, has_more=has_more)

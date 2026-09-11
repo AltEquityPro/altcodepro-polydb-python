@@ -91,11 +91,18 @@ work against overflowed records.
 | [DynamoDBAdapter](src/polydb/adapters/DynamoDBAdapter.py) | 400KB item (`DYNAMODB_MAX_SIZE`) | S3 (`bucket_name`) | whole item |
 | [FirestoreAdapter](src/polydb/adapters/FirestoreAdapter.py) | 1MB doc (`FIRESTORE_MAX_SIZE`) | GCS bucket | whole document |
 | [NoSQLKVAdapter](src/polydb/base/NoSQLKVAdapter.py) base | 1MB (`max_size`) | `CloudDatabaseFactory().get_object_storage()` | whole record, `overflow/<md5>.json` |
+| [BlockchainKVAdapter](src/polydb/adapters/BlockchainKVAdapter.py) | 8KB (`BLOCKCHAIN_MAX_SIZE`, extends the base) | same `get_object_storage()` path | whole record — a far lower ceiling than the base default given on-chain storage's real per-byte cost |
 
 Azure's is the most refined: it overflows *individual properties* rather than the whole entity, so
 a row with one huge JSON column keeps every other column queryable in the table, and
 `_restore_overflow_properties` splices the blob contents back into that field on read. Blob keys are
 content-addressed (`<pk>_<rk>/<field>/<md5>.json`), making rewrites idempotent.
+
+MongoDB and Vercel KV take the base `NoSQLKVAdapter` row as-is (no override) — since 2.5.11 both
+`put()` and `patch()` funnel through `_check_overflow`, so this is a real, uniform guarantee on
+every write path, not just `patch()`. Overflow blobs are content-addressed and never rewritten in
+place, only ever written fresh and orphaned by later updates — see `overflow_gc.py` (2.5.11) for
+the sweeper that reclaims them.
 
 When touching any NoSQL adapter, **the overflow round-trip is the invariant to preserve**: any new
 read path must funnel through the adapter's `_resolve_overflow` / `_restore_overflow_properties`,
@@ -163,6 +170,62 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 3. Run black/isort and the relevant test markers.
 
 ## Recent changes
+
+- **2.5.11** — Phase 0 hardening: four reproduced gaps in the NoSQL KV layer, all closed together
+  since they share the same overflow/adapter-vending code paths.
+  - [`NoSQLKVAdapter.put()`](src/polydb/base/NoSQLKVAdapter.py) now calls `_check_overflow()` before
+    `_put_raw()`, exactly like `patch()` already did. Previously a plain `create()`-shaped write
+    went straight to `_put_raw()` with no size check at all — the base class's own overflow
+    facility existed but only `patch()` ever reached it, so any adapter that relies on the base
+    write path (`MongoDBAdapter`, `VercelKVAdapter`) had a dead overflow guarantee on `put()`
+    specifically, even though the exact same payload overflowed correctly through `patch()`.
+    Reproduced and closed in `tests/test_nosql_kv_overflow_write_path.py` (an in-memory
+    `NoSQLKVAdapter` subclass proves `put()` and `patch()` now overflow the identical payload
+    identically, that the overflowed row round-trips through `query()`, and that a tampered blob
+    still raises on checksum mismatch).
+  - [`BlockchainKVAdapter`](src/polydb/adapters/BlockchainKVAdapter.py) previously stood entirely
+    outside the `NoSQLKVAdapter` hierarchy with zero size guard — an oversized record was sent
+    on-chain unmodified, both far more expensive per byte than any off-chain store and, on most EVM
+    chains, likely to be rejected outright past the call-data size ceiling before this adapter's own
+    logic ever ran. It now extends `NoSQLKVAdapter` (gaining `_check_overflow`/`_retrieve_overflow`
+    for free; its own `put`/`get`/`delete`/`query` stay overridden exactly as before, since none of
+    them use the base class's pk/rk addressing) with its own much lower ceiling,
+    `BLOCKCHAIN_MAX_SIZE = 8 * 1024`, reflecting on-chain storage's real cost profile. Verified in
+    `tests/test_blockchain_overflow_guard.py` without a live chain — `object.__new__` bypasses the
+    real `__init__`'s Web3/RPC/account setup (none of which the overflow guard depends on) and wires
+    in only what `put()`/`get()` actually touch, proving the oversized payload never reaches
+    `contract.functions.put()` and that `get()` rehydrates and checksum-verifies correctly.
+  - [`CloudDatabaseFactory.get_nosql_kv()`](src/polydb/cloudDatabaseFactory.py)'s adapter cache was
+    keyed by `name` alone: a second call with a different `partition_config` under the same `name`
+    silently returned the first adapter, the second caller's partition config thrown away with no
+    error. The cache key now incorporates a stable string identity of `partition_config`
+    (mirroring the existing `object::`/`secrets::` composite-key pattern used by
+    `get_object_storage()`/`get_secrets()` in the same file). Also dropped the Azure branch's dead
+    `table_name = cfg.table_name` assignment (the adapter's constructor has never accepted a
+    `table_name` parameter — table resolution is per-model via `_get_table_name()`, see 2.5.8).
+  - `get_nosql_kv()`'s provider branch used to fall through to a bare `else: MongoDBAdapter("", "")`
+    for any unmatched `CloudProvider` (`POSTGRESQL`, `S3_COMPATIBLE`, `VAULT`, `KAFKA`, `RABBITMQ`)
+    — a Mongo client pointed at an empty URI that failed obscurely on first real use instead of
+    here, at construction, with a message naming the actual problem. `MONGODB` is now its own
+    explicit `elif` branch and every other provider raises `UnsupportedStorageTypeError` naming the
+    provider and pointing at `get_sql()` for the Postgres-only case. Both fixes verified in
+    `tests/test_cloud_factory.py`'s new `TestNoSQLKVAdapterCache`/`TestNoSQLKVProviderFallback`
+    classes (constructed without any live backend — `VercelKVAdapter` connects lazily, so cache
+    identity is provable with no Redis running).
+  - New: [`overflow_gc.py`](src/polydb/overflow_gc.py)'s `sweep_overflow_blobs()` closes the
+    "overflow blobs are never garbage-collected" gap — content-addressed keys mean an update to an
+    already-overflowed record orphans the old blob, and `delete()` only ever removed the reference
+    row, never the blob it pointed at, so overflow storage grew without bound for the life of a
+    deployment. A conservative two-pass mark-and-sweep: a blob unreferenced by any live row (across
+    caller-supplied models, scanned via the adapter's own `_query_raw`) is only a *candidate* the
+    first time it's seen, recorded with the wall-clock time in a small state blob written back into
+    the same object store (`<prefix>_gc_state.json`); it's only actually deleted once
+    `grace_seconds` have elapsed since that first sighting *and* it's still unreferenced on a later
+    sweep — giving a real grace window without needing last-modified timestamps, which
+    `ObjectStorageAdapter` exposes on no backend. A blob re-referenced between two sweeps (a
+    concurrent write racing the sweep) drops out of the candidate list instead of being deleted.
+    Covered end to end in `tests/test_overflow_gc.py` with a fake object store and adapter,
+    including the re-referenced-between-sweeps and dry-run cases.
 
 - **2.5.9** — Fixed a real, reproduced bug in
   [`AzureTableStorageAdapter._put_raw()`](src/polydb/adapters/AzureTableStorageAdapter.py): a
@@ -330,46 +393,29 @@ Ordered roughly by impact. None of these are in-flight; treat as a backlog.
 5. **`ModelRegistry` ([registry.py](src/polydb/registry.py)) is dead code** — defined, documented,
    never imported. Either wire it into `_extract_meta()` (it is the only path that supports
    `register_dynamic()` schema-driven models) or drop it.
-6. **`CloudDatabaseFactory` caches adapters by name only.** `get_nosql_kv(partition_config=X,
-   name="kv")` followed by `get_nosql_kv(partition_config=Y, name="kv")` silently returns the
-   first adapter with partition config X. Cache key should include the partition config.
-7. **`get_nosql_kv` falls through to MongoDB for unmatched providers.** With provider
-   `POSTGRESQL` or `S3_COMPATIBLE` it constructs a `MongoDBAdapter` with an empty URI, which fails
-   obscurely later. Harmless for the common SQL-only case (those apps only call `get_sql()`), but a
-   `POSTGRESQL` app that adds a KV model gets a Mongo connection error instead of
-   `UnsupportedStorageTypeError`. (`table_name` in the Azure branch is also assigned and never
-   used.)
-8. **No CI.** No `.github/workflows` — no lint, type-check, test, or publish automation, and no
+6. **No CI.** No `.github/workflows` — no lint, type-check, test, or publish automation, and no
    dependency/secret scanning on a repo that ships credential-handling code.
-9. **No async API.** Everything is synchronous (`ComplianceService` is the lone `async def`), which
+7. **No async API.** Everything is synchronous (`ComplianceService` is the lone `async def`), which
    rules out FastAPI/asyncio callers except via thread pools. A documented stance ("sync only, wrap
    in `run_in_executor`") would at least set expectations.
-10. **Two competing pytest configs.** Both `pytest.ini` and `[tool.pytest.ini_options]` exist with
-    different `addopts`; `pytest.ini` wins, so the coverage flags in `pyproject.toml` never apply.
-11. **Docs drift.** [README.md](README.md)'s "Project Structure" describes `adapters/aws/`,
-    `core/`, `security/` package directories that do not exist, and BUILD_GUIDE.md lists
-    `database.py` / `factory.py`. Neither documents the `PolyDB` facade or the env-var contract
-    (`POLYDB_ENCRYPTION_KEY*`, `POLYDB_AUDIT_HMAC_KEY`, `POLYDB_SLOW_QUERY_MS`,
-    `POLYDB_QUEUE_VISIBILITY_TIMEOUT`, `REDIS_CACHE_URL`, `CLOUD_PROVIDER`).
-12. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
+8. **Two competing pytest configs.** Both `pytest.ini` and `[tool.pytest.ini_options]` exist with
+   different `addopts`; `pytest.ini` wins, so the coverage flags in `pyproject.toml` never apply.
+9. **Docs drift.** [README.md](README.md)'s "Project Structure" describes `adapters/aws/`,
+   `core/`, `security/` package directories that do not exist, and BUILD_GUIDE.md lists
+   `database.py` / `factory.py`. Neither documents the `PolyDB` facade or the env-var contract
+   (`POLYDB_ENCRYPTION_KEY*`, `POLYDB_AUDIT_HMAC_KEY`, `POLYDB_SLOW_QUERY_MS`,
+   `POLYDB_QUEUE_VISIBILITY_TIMEOUT`, `REDIS_CACHE_URL`, `CLOUD_PROVIDER`).
+10. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
     SECURITY.md, issue/PR templates, or code of conduct, and no published API reference.
-13. **Typo in extra name:** `bolckchain` should be `blockchain` (rename, keeping the old key as an
+11. **Typo in extra name:** `bolckchain` should be `blockchain` (rename, keeping the old key as an
     alias for one release).
-14. **Overflow is not uniform across adapters.** Azure Table, DynamoDB and Firestore each
-    implement it independently; **MongoDB, Vercel KV and Blockchain KV have no overflow at all**, so
-    a document over Mongo's 16MB BSON limit or past Vercel KV's value cap fails at the driver
-    instead of spilling to blob. The base-class `_check_overflow` / `_retrieve_overflow` exist to be
-    that shared path — wiring the remaining three to it (or documenting them as size-limited) would
-    make "users don't worry about size" true everywhere.
-15. **The base class's `put()` never calls `_check_overflow`.** `NoSQLKVAdapter.put()` goes straight
-    to `_put_raw`; only `patch()` checks. Every adapter that relies on the base write path (Vercel
-    KV, MongoDB) therefore has a dead overflow facility, and `self.max_size` is unused on the write
-    side for Azure too — Azure branches on its own hard-coded `MAX_PROPERTY_CHARS = 30 * 1024`
-    instead, while `AZURE_TABLE_MAX_SIZE = 60 * 1024` is set on `self.max_size` and never consulted.
-    Two different thresholds, neither of them the one in the comment (which says "1MB").
-16. **Overflow blobs are never garbage-collected.** Content-addressed keys mean an update writes a
-    new blob and orphans the old one; `delete` removes the reference row but the blob stays. There
-    is no sweeper and no lifecycle-policy guidance, so overflow storage grows without bound.
-17. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, `architecture/`, `token.txt`
+12. **Azure Table's overflow threshold still doesn't consult `self.max_size`.** Azure branches on
+    its own hard-coded `MAX_PROPERTY_CHARS = 30 * 1024` instead; `AZURE_TABLE_MAX_SIZE = 60 * 1024`
+    is set on `self.max_size` and never read. Two different thresholds, neither of them the one in
+    the base class's own comment (which says "1MB"). Narrower than the fixed 2.5.11 gap (`put()`
+    skipping overflow entirely) — this one is Azure's per-property granularity being on a separate
+    code path from the base class by design (see the overflow table above), just not yet unified
+    on a single configured threshold.
+13. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, `architecture/`, `token.txt`
     and a checked-in `dist/` are dev scratch in the project root. `.env`/`token.txt` are correctly
     gitignored and untracked — keep it that way.

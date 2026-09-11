@@ -5,8 +5,9 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-
 from dotenv import load_dotenv
+
+from ..base.NoSQLKVAdapter import NoSQLKVAdapter
 
 logger = logging.getLogger(__name__)
 
@@ -18,8 +19,18 @@ SUPPORTED_CHAINS = {
     "arbitrum",
 }
 
+# On-chain storage is priced per byte of calldata/state -- a far lower ceiling
+# than an off-chain KV store makes sense here, both for gas cost and because
+# most chains cap contract call-data size well under 1MB. Anything over this
+# spills to the paired object store via the inherited _check_overflow /
+# _retrieve_overflow, the same "any size record" guarantee every other
+# NoSQLKVAdapter gives (see CLAUDE.md's overflow section) -- previously this
+# adapter had no size guard at all and would silently attempt an oversized,
+# expensive (or outright rejected) on-chain write.
+BLOCKCHAIN_MAX_SIZE = 8 * 1024
 
-class BlockchainKVAdapter:
+
+class BlockchainKVAdapter(NoSQLKVAdapter):
     """
     Generic blockchain key-value adapter.
 
@@ -41,6 +52,9 @@ class BlockchainKVAdapter:
         contract_address: Optional[str] = None,
         contract_abi: Optional[list] = None,
     ):
+        super().__init__(partition_config=None)
+        self.max_size = BLOCKCHAIN_MAX_SIZE
+
         load_dotenv()
 
         self.chain = (chain or os.getenv("BLOCKCHAIN_CHAIN", "ethereum")).lower()
@@ -126,12 +140,13 @@ class BlockchainKVAdapter:
 
     def put(self, model, data: Dict[str, Any]) -> Dict[str, Any]:
         key = str(data["id"])
-        payload = json.dumps(data)
+        store_data, _ = self._check_overflow(data)
+        payload = json.dumps(store_data)
 
         fn = self.contract.functions.put(key, payload)
         self._send_tx(fn)
 
-        return data
+        return store_data
 
     def get(self, model, key: str) -> Optional[Dict[str, Any]]:
         result = self.contract.functions.get(str(key)).call()
@@ -139,7 +154,7 @@ class BlockchainKVAdapter:
         if not result:
             return None
 
-        return json.loads(result)
+        return self._retrieve_overflow(json.loads(result))
 
     def delete(self, model, key: str):
         fn = self.contract.functions.deleteKey(str(key))
