@@ -57,6 +57,7 @@ def adapter():
 # Core send -> receive -> ack round trip (the "done" criterion from the task)
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestRabbitMQRoundTrip:
     def test_send_returns_a_message_id(self, adapter):
         queue = _queue_name()
@@ -168,6 +169,7 @@ class TestRabbitMQRoundTrip:
 # Wiring through CloudDatabaseFactory.get_queue()
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestRabbitMQFactoryWiring:
     def test_get_queue_returns_rabbitmq_adapter(self):
         url = os.getenv("RABBITMQ_URL", "amqp://guest:guest@localhost:5672/%2F")
@@ -224,6 +226,7 @@ class TestRabbitMQFactoryWiring:
 # nack / purge / declare / status -- real broker coverage for the new
 # QueueAdapter methods
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestRabbitMQNack:
     def test_nack_requeues_for_immediate_redelivery(self, adapter):
@@ -330,6 +333,7 @@ class TestRabbitMQStatus:
 # Dead-letter queue -- real end-to-end AMQP dead-lettering, not a
 # hand-rolled shadow implementation
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestRabbitMQDeadLetterQueue:
     def test_rejected_message_lands_in_the_real_dlq_and_is_receivable_there(self, adapter):

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, List, Optional, Tuple, Type, Union
+from typing import Any, Dict, List, Optional, Tuple, Type
 
 from .advanced_query import AdvancedQueryBuilder, QueryHelper
 from .batch import BatchOperations, BatchResult

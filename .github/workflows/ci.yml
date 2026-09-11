@@ -1,0 +1,124 @@
+# Phase 1 (launch-roadmap): closes CLAUDE.md's own "Known gaps" item 6 --
+# "No CI. No .github/workflows -- no lint, type-check, test, or publish
+# automation, and no dependency/secret scanning on a repo that ships
+# credential-handling code." Gates the branch this repo's downstream
+# consumer (altcodepro-universal-interprter) pins against.
+#
+# Scoped deliberately: `test` below runs only the emulator-light provider
+# suites (postgresql/mongodb/vercel/multi_engine -- Postgres, Mongo and
+# Redis containers, no heavyweight cloud emulators) as a real, fast,
+# reliable gate. azure/aws/gcp/blockchain need docker-compose.test.yml's
+# full emulator stack (Azurite, LocalStack, the gcloud-SDK-based Firestore/
+# Pub/Sub emulators, fake-gcs, Ganache, IPFS) -- slower and more failure-
+# prone to run on every push; a contributor changing one of those adapters
+# still runs `docker compose -f docker-compose.test.yml up -d && pytest -m
+# <provider>` locally (see Readme_Integration_Tests.md). Widening this
+# workflow to the full emulator stack is real, separate, valuable future
+# work, not something to bolt on silently as a "shorter is fine" shortcut.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[dev]"
+      - run: black --check src tests
+      - run: isort --check-only src tests
+      - run: flake8 src
+      - name: mypy (report only -- see CLAUDE.md known gap 4, python-version metadata is still inconsistent)
+        run: mypy src || true
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Dependency vulnerability scan (pip-audit)
+        run: |
+          pip install pip-audit
+          pip install -e ".[all]"
+          # Report-only for now: this repo has never been audited before,
+          # so failing the build on the first-ever run would block every
+          # PR on pre-existing transitive findings nobody has triaged yet.
+          # Flip to blocking once a first pass has been reviewed.
+          pip-audit --skip-editable || true
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: polydb
+          POSTGRES_PASSWORD: polydb
+          POSTGRES_DB: polydb_test
+        ports: ["5433:5432"]
+        options: >-
+          --health-cmd "pg_isready -U polydb -d polydb_test"
+          --health-interval 3s --health-timeout 5s --health-retries 10
+      mongo:
+        image: mongo:7
+        ports: ["27018:27017"]
+      redis-vercel:
+        image: redis:7-alpine
+        ports: ["6380:6379"]
+      redis-cache:
+        image: redis:7-alpine
+        ports: ["6381:6379"]
+    env:
+      POSTGRES_CONNECTION_STRING: postgresql://polydb:polydb@localhost:5433/polydb_test
+      MONGODB_URI: mongodb://localhost:27018/polydb_test
+      KV_REST_API_URL: redis://localhost:6380
+      REDIS_CACHE_URL: redis://localhost:6381
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install -e ".[all,dev,test]"
+      - name: Wait for mongo/redis (no built-in Docker healthcheck on these images)
+        run: |
+          python - <<'PY'
+          import socket, time
+          targets = [("localhost", 27018), ("localhost", 6380), ("localhost", 6381)]
+          deadline = time.monotonic() + 60
+          for host, port in targets:
+              while True:
+                  try:
+                      with socket.create_connection((host, port), timeout=2):
+                          break
+                  except OSError:
+                      if time.monotonic() > deadline:
+                          raise SystemExit(f"{host}:{port} never became reachable")
+                      time.sleep(1)
+          PY
+      # multi_engine deliberately excluded: TestSingleEngine's own
+      # _patch_factory test helper calls db._meta()/db._model_type(),
+      # neither of which exists on DatabaseFactory today (meta extraction
+      # is the module-level _extract_meta() function, confirmed by
+      # reading databaseFactory.py directly) -- real, pre-existing test
+      # drift from an old API shape, reproduced against this exact commit
+      # BEFORE this CI workflow was added (byte-for-byte identical
+      # failures with and without every change in this same changeset).
+      # Tracked as its own known gap rather than silently left out of
+      # this workflow's own reasoning; a CI gate that's red on day one
+      # from an unrelated bug teaches everyone to ignore it.
+      - run: pytest -m "postgresql or mongodb or vercel" --tb=short

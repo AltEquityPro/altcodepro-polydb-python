@@ -8,7 +8,7 @@ from typing import List, Optional
 from dotenv import load_dotenv
 
 from ..base.SharedFilesAdapter import SharedFilesAdapter
-from ..errors import StorageError, ConnectionError
+from ..errors import ConnectionError, StorageError
 
 SUPPORTED_CHAINS = {"ethereum", "polygon", "avalanche", "bnb", "arbitrum"}
 

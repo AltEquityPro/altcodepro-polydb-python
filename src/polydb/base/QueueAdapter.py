@@ -1,8 +1,7 @@
-from polydb.utils import setup_logger
-
-
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+
+from polydb.utils import setup_logger
 
 
 class QueueAdapter(ABC):

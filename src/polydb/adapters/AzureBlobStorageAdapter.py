@@ -1,9 +1,10 @@
 # src/polydb/adapters/AzureBlobStorageAdapter.py
 
+import mimetypes
 import os
 import threading
-import mimetypes
 from typing import Any, Dict, List, Optional
+
 from ..base.ObjectStorageAdapter import ObjectStorageAdapter
 from ..errors import ConnectionError, StorageError
 from ..retry import retry

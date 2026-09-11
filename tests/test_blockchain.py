@@ -1,10 +1,10 @@
-import pytest
 import uuid
 
-from polydb.adapters.BlockchainKVAdapter import BlockchainKVAdapter
-from polydb.adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
-from polydb.adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
+import pytest
 
+from polydb.adapters.BlockchainBlobAdapter import BlockchainBlobAdapter
+from polydb.adapters.BlockchainKVAdapter import BlockchainKVAdapter
+from polydb.adapters.BlockchainQueueAdapter import BlockchainQueueAdapter
 
 pytestmark = pytest.mark.blockchain
 

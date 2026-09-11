@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re as _re
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
@@ -21,21 +22,18 @@ from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
-
+from .audit.context import AuditContext
+from .audit.manager import AuditManager
 from .base.NoSQLKVAdapter import NoSQLKVAdapter
-
 from .batch import BatchOperations
 from .cache import CacheWarmer, RedisCacheEngine
-from .monitoring import HealthCheck, MetricsCollector, PerformanceMonitor
-from .security import DataMasking, FieldEncryption
-from .errors import AdapterConfigurationError
-from .types import JsonDict, Lookup, ModelMeta
-from .audit.manager import AuditManager
-from .audit.context import AuditContext
-from .query import Operator, QueryBuilder
 from .cloudDatabaseFactory import CloudDatabaseFactory
+from .errors import AdapterConfigurationError
 from .models import PageRequest, PageResult
-import re as _re
+from .monitoring import HealthCheck, MetricsCollector, PerformanceMonitor
+from .query import QueryBuilder
+from .security import DataMasking, FieldEncryption
+from .types import JsonDict, Lookup, ModelMeta
 
 logger = logging.getLogger(__name__)
 
@@ -382,7 +380,6 @@ class DatabaseFactory:
         adapters = self._adapters_for(model, meta, engine_override)
         after_plain = None
         success = False
-        error: Optional[str] = None
         entity_id: Optional[Any] = None
 
         def _op() -> JsonDict:
@@ -559,7 +556,6 @@ class DatabaseFactory:
         )
         after_plain = None
         success = False
-        error: Optional[str] = None
 
         def _op() -> JsonDict:
             nonlocal after_plain, success
@@ -687,7 +683,6 @@ class DatabaseFactory:
         adapters = self._adapters_for(model, meta, engine_override)
         after_plain = None
         success = False
-        error: Optional[str] = None
 
         def _op() -> JsonDict:
             nonlocal after_plain, success
@@ -763,7 +758,6 @@ class DatabaseFactory:
             session_vars=session_vars,
         )
         success = False
-        error: Optional[str] = None
 
         def _op() -> JsonDict:
             nonlocal success

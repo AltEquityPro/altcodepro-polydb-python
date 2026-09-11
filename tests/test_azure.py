@@ -18,7 +18,6 @@ import io
 import time
 
 import pytest
-
 from conftest import uid
 
 pytestmark = pytest.mark.azure
@@ -27,6 +26,7 @@ pytestmark = pytest.mark.azure
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers / sentinels
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class AzureItem:
     """Sentinel model — adapter uses class name as Table name."""
@@ -39,6 +39,7 @@ def entity(**extra) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 # TABLE STORAGE (NoSQL KV)
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestAzureTable:
     def test_put_and_query(self, azure_nosql):
@@ -84,11 +85,9 @@ class TestAzureTable:
         assert len(page1) <= 3
 
         if tok:
-            page2, _ = azure_nosql.query_page(
-                AzureItem, {"tenant_id": tag}, 3, tok
-            )
+            page2, _ = azure_nosql.query_page(AzureItem, {"tenant_id": tag}, 3, tok)
             all_ids = {r["id"] for r in page1} | {r["id"] for r in page2}
-            assert len(all_ids) >= 4   # at least 4 distinct items across two pages
+            assert len(all_ids) >= 4  # at least 4 distinct items across two pages
 
     def test_query_limit(self, azure_nosql):
         for _ in range(4):
@@ -105,9 +104,9 @@ class TestAzureTable:
         azure_nosql.put(AzureItem, d1)
         azure_nosql.put(AzureOther, d2)
 
-        in_item  = azure_nosql.query(AzureItem,  {"id": d2["id"]})
+        in_item = azure_nosql.query(AzureItem, {"id": d2["id"]})
         in_other = azure_nosql.query(AzureOther, {"id": d1["id"]})
-        assert in_item  == []
+        assert in_item == []
         assert in_other == []
 
 
@@ -115,9 +114,10 @@ class TestAzureTable:
 # BLOB STORAGE
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestAzureBlob:
     def test_upload_and_download(self, azure_blob):
-        key     = f"test/{uid()}.txt"
+        key = f"test/{uid()}.txt"
         content = b"hello azurite blob"
         azure_blob.upload(key, content)
         downloaded = azure_blob.download(key)
@@ -145,8 +145,8 @@ class TestAzureBlob:
         assert all(k in listed for k in keys)
 
     def test_upload_large_blob(self, azure_blob):
-        key     = f"test/{uid()}.bin"
-        content = b"A" * (1024 * 1024)   # 1 MB
+        key = f"test/{uid()}.bin"
+        content = b"A" * (1024 * 1024)  # 1 MB
         azure_blob.upload(key, content)
         assert azure_blob.download(key) == content
 
@@ -154,6 +154,7 @@ class TestAzureBlob:
 # ────────────────────────────────────────────────────────────────────────────
 # QUEUE
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestAzureQueue:
     def test_send_and_receive(self, azure_queue):
@@ -188,7 +189,7 @@ class TestAzureQueue:
 @pytest.mark.skip(reason="Azure File Share not supported by Azurite")
 class TestAzureFiles:
     def test_upload_and_download_file(self, azure_files):
-        path    = f"share/test/{uid()}.txt"
+        path = f"share/test/{uid()}.txt"
         content = b"azure file share content"
         azure_files.upload(path, content)
         downloaded = azure_files.download(path)
@@ -196,7 +197,7 @@ class TestAzureFiles:
 
     def test_list_files(self, azure_files):
         prefix = f"share/list-{uid()}/"
-        files  = [f"{prefix}{uid()}.txt" for _ in range(2)]
+        files = [f"{prefix}{uid()}.txt" for _ in range(2)]
         for f in files:
             azure_files.upload(f, b"data")
         listed = azure_files.list(prefix)

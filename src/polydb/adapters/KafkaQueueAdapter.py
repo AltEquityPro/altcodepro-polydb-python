@@ -1,14 +1,14 @@
 # src/polydb/adapters/KafkaQueueAdapter.py
-import os
 import json
+import os
 import threading
 import uuid
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
-from ..retry import retry
 from ..json_safe import json_safe
+from ..retry import retry
 
 
 class KafkaQueueAdapter(QueueAdapter):
@@ -47,9 +47,7 @@ class KafkaQueueAdapter(QueueAdapter):
         # partition assignment / offsets with each other. Callers that
         # actually want shared work-queue semantics across processes pass
         # an explicit group_id (or set KAFKA_GROUP_ID).
-        self.group_id = (
-            group_id or os.getenv("KAFKA_GROUP_ID") or f"polydb-{uuid.uuid4().hex[:12]}"
-        )
+        self.group_id = group_id or os.getenv("KAFKA_GROUP_ID") or f"polydb-{uuid.uuid4().hex[:12]}"
         self.client_id = client_id or os.getenv("KAFKA_CLIENT_ID", "polydb")
         self.auto_offset_reset = auto_offset_reset
 
@@ -61,12 +59,8 @@ class KafkaQueueAdapter(QueueAdapter):
             "KAFKA_SECURITY_PROTOCOL", "PLAINTEXT"
         )
         self.sasl_mechanism = sasl_mechanism or os.getenv("KAFKA_SASL_MECHANISM") or None
-        self.sasl_plain_username = (
-            sasl_plain_username or os.getenv("KAFKA_SASL_USERNAME") or None
-        )
-        self.sasl_plain_password = (
-            sasl_plain_password or os.getenv("KAFKA_SASL_PASSWORD") or None
-        )
+        self.sasl_plain_username = sasl_plain_username or os.getenv("KAFKA_SASL_USERNAME") or None
+        self.sasl_plain_password = sasl_plain_password or os.getenv("KAFKA_SASL_PASSWORD") or None
         self.ssl_cafile = ssl_cafile or os.getenv("KAFKA_SSL_CAFILE") or None
 
         self._producer: Any = None
@@ -114,9 +108,7 @@ class KafkaQueueAdapter(QueueAdapter):
                     value_serializer=lambda v: v,
                     **self._client_kwargs(),
                 )
-                self.logger.info(
-                    f"Initialized Kafka producer (bootstrap={self.bootstrap_servers})"
-                )
+                self.logger.info(f"Initialized Kafka producer (bootstrap={self.bootstrap_servers})")
             except Exception as e:
                 raise ConnectionError(f"Kafka producer init failed: {e}")
             return self._producer
@@ -142,7 +134,9 @@ class KafkaQueueAdapter(QueueAdapter):
                     auto_offset_reset=self.auto_offset_reset,
                     **self._client_kwargs(),
                 )
-                self.logger.info(f"Initialized Kafka consumer (topic={topic}, group={self.group_id})")
+                self.logger.info(
+                    f"Initialized Kafka consumer (topic={topic}, group={self.group_id})"
+                )
             except Exception as e:
                 raise ConnectionError(f"Kafka consumer init failed: {e}")
             self._consumers[topic] = consumer

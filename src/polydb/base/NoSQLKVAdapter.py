@@ -339,7 +339,9 @@ class NoSQLKVAdapter:
     # ---------------------------------------------------------------
 
     @property
-    def capabilities(self) -> "BackendCapabilities":
+    def capabilities(
+        self,
+    ) -> "BackendCapabilities":  # noqa: F821 -- lazily imported below, quoted on purpose
         from ..models import BackendCapabilities
 
         return BackendCapabilities()
@@ -353,7 +355,11 @@ class NoSQLKVAdapter:
         except Exception:
             return {}
 
-    def query_paged(self, model: type, request: "PageRequest") -> "PageResult":
+    def query_paged(
+        self,
+        model: type,
+        request: "PageRequest",  # noqa: F821 -- lazily imported below, quoted on purpose
+    ) -> "PageResult":  # noqa: F821 -- lazily imported below, quoted on purpose
         """In-memory pagination with opaque offset cursor. Subclasses may override."""
         from ..models import PageResult
 

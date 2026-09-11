@@ -1,11 +1,11 @@
 # src/polydb/audit/manager.py
 from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
+from typing import Any, Dict, List, Optional
 
-from .models import AuditRecord
 from .AuditStorage import AuditStorage
 from .context import AuditContext
+from .models import AuditRecord
 
 
 class AuditManager:
@@ -24,7 +24,7 @@ class AuditManager:
         before: Optional[Dict[str, Any]],
         after: Optional[Dict[str, Any]],
         error: Optional[str],
-        changed_fields: List[str] | None
+        changed_fields: List[str] | None,
     ) -> None:
         tenant_id = AuditContext.tenant_id.get()
         previous_hash = self.storage.get_last_hash(tenant_id)

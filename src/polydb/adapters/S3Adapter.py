@@ -11,9 +11,8 @@ import os
 import threading
 from typing import Any, Dict, List, Optional
 
-
 from ..base.ObjectStorageAdapter import ObjectStorageAdapter
-from ..errors import StorageError, ConnectionError
+from ..errors import ConnectionError, StorageError
 from ..retry import retry
 
 
@@ -72,7 +71,6 @@ class S3Adapter(ObjectStorageAdapter):
 
     def _ensure_bucket_exists(self):
         """Create bucket if it doesn't exist (safe for AWS + LocalStack)"""
-        import boto3
         from botocore.exceptions import ClientError
 
         if not self._client:

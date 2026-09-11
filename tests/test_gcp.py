@@ -11,12 +11,12 @@ Integration tests for all GCP adapters (via emulators).
 
 from __future__ import annotations
 
-from sqlite3 import DatabaseError
 import time
+from sqlite3 import DatabaseError
 
 import pytest
-
 from conftest import uid
+
 from polydb.base.NoSQLKVAdapter import NoSQLKVAdapter
 from polydb.query import Operator, QueryBuilder
 

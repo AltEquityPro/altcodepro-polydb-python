@@ -18,15 +18,16 @@ Records written before a key was configured stay verifiable. See
 than a loophole.
 """
 
-from dataclasses import dataclass, asdict
-from typing import Any, Dict, List, Optional
 import hashlib
 import hmac
 import json
 import logging
 import os
 import uuid
+from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
+
 from ..json_safe import json_safe
 
 logger = logging.getLogger("polydb.audit")

@@ -46,11 +46,11 @@ INJECTIONS = [
     "public; DROP DATABASE prod; --",
     'a" OR 1=1 --',
     "a'; --",
-    "schema name",          # whitespace
-    "1abc",                 # leading digit
-    "sch-ema",              # hyphen is not valid unquoted
-    "",                     # empty
-    "a" * 80,               # over the identifier length limit
+    "schema name",  # whitespace
+    "1abc",  # leading digit
+    "sch-ema",  # hyphen is not valid unquoted
+    "",  # empty
+    "a" * 80,  # over the identifier length limit
 ]
 
 
@@ -119,14 +119,10 @@ class TestLegitimateNamesStillWork:
             schema_name="tenant_acme",
         )
         mgr.provision_tenant(cfg)
-        assert factory._sql.executed == [
-            "CREATE SCHEMA IF NOT EXISTS tenant_acme;"
-        ]
+        assert factory._sql.executed == ["CREATE SCHEMA IF NOT EXISTS tenant_acme;"]
 
         mgr.deprovision_tenant("t1")
-        assert factory._sql.executed[-1] == (
-            "DROP SCHEMA IF EXISTS tenant_acme CASCADE;"
-        )
+        assert factory._sql.executed[-1] == ("DROP SCHEMA IF EXISTS tenant_acme CASCADE;")
 
     def test_database_provision(self):
         factory, mgr = _manager()
@@ -140,8 +136,6 @@ class TestLegitimateNamesStillWork:
 
     def test_shared_schema_issues_no_ddl(self):
         factory, mgr = _manager()
-        cfg = TenantConfig(
-            tenant_id="t1", isolation_level=IsolationLevel.SHARED_SCHEMA
-        )
+        cfg = TenantConfig(tenant_id="t1", isolation_level=IsolationLevel.SHARED_SCHEMA)
         mgr.provision_tenant(cfg)
         assert factory._sql.executed == []

@@ -4,7 +4,7 @@ PolyDB - Enterprise Cloud-Independent Database Abstraction
 Full LINQ support, field-level audit, cache, soft delete, overflow storage
 """
 
-__version__ = "2.5.11"
+__version__ = "2.5.12"
 
 from .audit.context import AuditContext
 from .cache import RedisCacheEngine as CacheEngine

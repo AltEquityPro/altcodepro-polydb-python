@@ -4,7 +4,6 @@ import os
 import threading
 from typing import Dict, List, Optional
 
-from .base import SharedFilesAdapter
 from .errors import UnsupportedStorageTypeError
 
 # Deliberately NOT importing adapter classes at module level (they used to
@@ -28,7 +27,6 @@ from .models import (
     DynamoDBConfig,
     EFSFileConfig,
     FirestoreConfig,
-    GCPFileConfig,
     GCPPubSubConfig,
     GCPSecretManagerConfig,
     GCPStorageConfig,
@@ -116,11 +114,14 @@ class CloudDatabaseFactory:
         name: str = "azure",
         container_name: Optional[str] = None,
     ) -> (
-        AzureBlobStorageAdapter
-        | S3CompatibleAdapter
-        | GCPStorageAdapter
-        | VercelBlobAdapter
-        | BlockchainBlobAdapter
+        # noqa: F821 -- deliberately never imported at module level (see
+        # this file's own top comment); real only under `from __future__
+        # import annotations`, which this module has.
+        AzureBlobStorageAdapter  # noqa: F821
+        | S3CompatibleAdapter  # noqa: F821
+        | GCPStorageAdapter  # noqa: F821
+        | VercelBlobAdapter  # noqa: F821
+        | BlockchainBlobAdapter  # noqa: F821
     ):
         with self._lock:
             # cache per (name, container) so different containers don't collide
@@ -393,13 +394,15 @@ class CloudDatabaseFactory:
     def get_queue(
         self, name="azure_queue"
     ) -> (
-        AzureQueueAdapter
-        | SQSAdapter
-        | GCPPubSubAdapter
-        | VercelQueueAdapter
-        | BlockchainQueueAdapter
-        | KafkaQueueAdapter
-        | RabbitMQAdapter
+        # noqa: F821 -- same deliberate not-imported-at-module-level
+        # pattern as get_object_storage's own return annotation above.
+        AzureQueueAdapter  # noqa: F821
+        | SQSAdapter  # noqa: F821
+        | GCPPubSubAdapter  # noqa: F821
+        | VercelQueueAdapter  # noqa: F821
+        | BlockchainQueueAdapter  # noqa: F821
+        | KafkaQueueAdapter  # noqa: F821
+        | RabbitMQAdapter  # noqa: F821
     ):
         with self._lock:
             if name in self.instances:

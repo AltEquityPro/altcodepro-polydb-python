@@ -25,8 +25,8 @@ import uuid
 from typing import Any
 
 import pytest
-
 from conftest import uid
+
 from polydb.errors import DatabaseError
 from polydb.query import Operator, QueryBuilder
 
@@ -49,6 +49,7 @@ def fresh(name: str = "test", value: int = 1, **extra) -> dict:
 # Fixtures
 # ────────────────────────────────────────────────────────────────────────────
 
+
 @pytest.fixture(autouse=True)
 def clean_table(pg_sql, pg_schema):
     """Wipe test data before each test (not after, so failures are inspectable)."""
@@ -60,6 +61,7 @@ def clean_table(pg_sql, pg_schema):
 # ────────────────────────────────────────────────────────────────────────────
 # INSERT
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestInsert:
     def test_insert_returns_row(self, pg_sql):
@@ -85,23 +87,24 @@ class TestInsert:
         assert result["tags"] == ["x", "y", "z"]
 
     def test_insert_null_optional_fields(self, pg_sql):
-        data = fresh()               # no meta, no tags
+        data = fresh()  # no meta, no tags
         result = pg_sql.insert(TABLE, data)
 
         assert result["meta"] is None
         assert result["tags"] is None
 
     def test_insert_duplicate_pk_raises(self, pg_sql):
-        
+
         data = fresh()
         pg_sql.insert(TABLE, data)
         with pytest.raises(DatabaseError):
-            pg_sql.insert(TABLE, data)   # same id → PK violation
+            pg_sql.insert(TABLE, data)  # same id → PK violation
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # SELECT
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestSelect:
     def test_select_all(self, pg_sql):
@@ -126,8 +129,8 @@ class TestSelect:
         assert r3["id"] not in ids_found
 
     def test_select_is_null(self, pg_sql):
-        r_null = pg_sql.insert(TABLE, fresh())             # deleted_at = NULL
-        r_del  = pg_sql.insert(TABLE, fresh(deleted_at="2024-01-01T00:00:00"))
+        r_null = pg_sql.insert(TABLE, fresh())  # deleted_at = NULL
+        r_del = pg_sql.insert(TABLE, fresh(deleted_at="2024-01-01T00:00:00"))
         results = pg_sql.select(TABLE, {"deleted_at": None})
         ids = {r["id"] for r in results}
         assert r_null["id"] in ids
@@ -142,8 +145,8 @@ class TestSelect:
     def test_select_offset(self, pg_sql):
         for _ in range(6):
             pg_sql.insert(TABLE, fresh())
-        all_rows  = pg_sql.select(TABLE)
-        with_off  = pg_sql.select(TABLE, offset=3)
+        all_rows = pg_sql.select(TABLE)
+        with_off = pg_sql.select(TABLE, offset=3)
         assert len(with_off) == len(all_rows) - 3
 
     def test_select_returns_empty_list(self, pg_sql):
@@ -154,6 +157,7 @@ class TestSelect:
 # ────────────────────────────────────────────────────────────────────────────
 # SELECT PAGE
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestSelectPage:
     def test_pagination_basic(self, pg_sql):
@@ -169,7 +173,7 @@ class TestSelectPage:
         assert token2 is not None
 
         page3, token3 = pg_sql.select_page(TABLE, {}, page_size=3, continuation_token=token2)
-        assert len(page3) == 1        # 7 items, 3+3+1
+        assert len(page3) == 1  # 7 items, 3+3+1
         assert token3 is None
 
     def test_pagination_no_overlap(self, pg_sql):
@@ -177,7 +181,7 @@ class TestSelectPage:
             pg_sql.insert(TABLE, fresh(f"pg-{i}"))
 
         page1, tok = pg_sql.select_page(TABLE, {}, page_size=3)
-        page2, _   = pg_sql.select_page(TABLE, {}, page_size=3, continuation_token=tok)
+        page2, _ = pg_sql.select_page(TABLE, {}, page_size=3, continuation_token=tok)
 
         ids1 = {r["id"] for r in page1}
         ids2 = {r["id"] for r in page2}
@@ -187,6 +191,7 @@ class TestSelectPage:
 # ────────────────────────────────────────────────────────────────────────────
 # UPDATE
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestUpdate:
     def test_update_by_id(self, pg_sql):
@@ -207,7 +212,7 @@ class TestUpdate:
         assert updated["meta"]["new"] is True
 
     def test_update_nonexistent_raises(self, pg_sql):
-        
+
         with pytest.raises(DatabaseError):
             pg_sql.update(TABLE, "nonexistent-id", {"name": "x"})
 
@@ -220,6 +225,7 @@ class TestUpdate:
 # ────────────────────────────────────────────────────────────────────────────
 # UPSERT
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestUpsert:
     def test_upsert_insert_new(self, pg_sql):
@@ -247,6 +253,7 @@ class TestUpsert:
 # DELETE
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestDelete:
     def test_delete_by_id(self, pg_sql):
         row = pg_sql.insert(TABLE, fresh())
@@ -261,7 +268,7 @@ class TestDelete:
         assert pg_sql.select(TABLE, {"id": row["id"]}) == []
 
     def test_delete_nonexistent_raises(self, pg_sql):
-        
+
         with pytest.raises(DatabaseError):
             pg_sql.delete(TABLE, "ghost-row")
 
@@ -269,6 +276,7 @@ class TestDelete:
 # ────────────────────────────────────────────────────────────────────────────
 # LINQ
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestLinq:
     def _seed(self, pg_sql, n: int = 5) -> list[dict]:
@@ -278,7 +286,7 @@ class TestLinq:
         return rows
 
     def test_linq_where_eq(self, pg_sql):
-        
+
         self._seed(pg_sql)
         pg_sql.insert(TABLE, fresh("target", 777))
         qb = QueryBuilder().where("name", Operator.EQ, "target")
@@ -287,15 +295,15 @@ class TestLinq:
         assert results[0]["value"] == 777
 
     def test_linq_where_gt(self, pg_sql):
-        
-        self._seed(pg_sql, 5)                # values 0,10,20,30,40
+
+        self._seed(pg_sql, 5)  # values 0,10,20,30,40
         qb = QueryBuilder().where("value", Operator.GT, 20)
         results = pg_sql.query_linq(TABLE, qb)
         assert all(r["value"] > 20 for r in results)
-        assert len(results) == 2             # 30, 40
+        assert len(results) == 2  # 30, 40
 
     def test_linq_order_by_asc(self, pg_sql):
-        
+
         self._seed(pg_sql, 4)
         qb = QueryBuilder().order_by("value", descending=False)
         results = pg_sql.query_linq(TABLE, qb)
@@ -303,7 +311,7 @@ class TestLinq:
         assert values == sorted(values)
 
     def test_linq_order_by_desc(self, pg_sql):
-        
+
         self._seed(pg_sql, 4)
         qb = QueryBuilder().order_by("value", descending=True)
         results = pg_sql.query_linq(TABLE, qb)
@@ -311,14 +319,14 @@ class TestLinq:
         assert values == sorted(values, reverse=True)
 
     def test_linq_take(self, pg_sql):
-        
+
         self._seed(pg_sql, 6)
         qb = QueryBuilder().take(3)
         results = pg_sql.query_linq(TABLE, qb)
         assert len(results) == 3
 
     def test_linq_skip(self, pg_sql):
-        
+
         self._seed(pg_sql, 5)
         all_rows = pg_sql.select(TABLE)
         qb = QueryBuilder().skip(2)
@@ -326,7 +334,7 @@ class TestLinq:
         assert len(results) == len(all_rows) - 2
 
     def test_linq_count(self, pg_sql):
-        
+
         self._seed(pg_sql, 4)
         qb = QueryBuilder().count()
         total = pg_sql.query_linq(TABLE, qb)
@@ -334,17 +342,17 @@ class TestLinq:
         assert total == 4
 
     def test_linq_distinct(self, pg_sql):
-        
+
         # Insert duplicates on the 'name' column
         for _ in range(3):
             pg_sql.insert(TABLE, fresh("dup-name", 1))
-        qb = QueryBuilder().select_fields(["name"]).distinct() # type: ignore
+        qb = QueryBuilder().select_fields(["name"]).distinct()  # type: ignore
         results = pg_sql.query_linq(TABLE, qb)
         names = [r["name"] for r in results]
         assert len(names) == len(set(names))
 
     def test_linq_where_like(self, pg_sql):
-        
+
         pg_sql.insert(TABLE, fresh("hello-world", 1))
         pg_sql.insert(TABLE, fresh("goodbye", 2))
         qb = QueryBuilder().where("name", Operator.IN, "%hello%")
@@ -356,27 +364,22 @@ class TestLinq:
 # EXECUTE RAW SQL
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestExecute:
     def test_execute_ddl(self, pg_sql):
         # Should not raise
-        pg_sql.execute(
-            "CREATE TABLE IF NOT EXISTS _polydb_exec_test (id TEXT PRIMARY KEY)"
-        )
+        pg_sql.execute("CREATE TABLE IF NOT EXISTS _polydb_exec_test (id TEXT PRIMARY KEY)")
         pg_sql.execute("DROP TABLE IF EXISTS _polydb_exec_test")
 
     def test_execute_fetch(self, pg_sql):
         pg_sql.insert(TABLE, fresh("exec-fetch", 55))
-        rows = pg_sql.execute(
-            f"SELECT * FROM {TABLE} WHERE name = %s", ["exec-fetch"], fetch=True
-        )
+        rows = pg_sql.execute(f"SELECT * FROM {TABLE} WHERE name = %s", ["exec-fetch"], fetch=True)
         assert len(rows) == 1
         assert rows[0]["value"] == 55
 
     def test_execute_fetch_one(self, pg_sql):
         pg_sql.insert(TABLE, fresh("exec-one", 66))
-        row = pg_sql.execute(
-            f"SELECT * FROM {TABLE} WHERE name = %s", ["exec-one"], fetch_one=True
-        )
+        row = pg_sql.execute(f"SELECT * FROM {TABLE} WHERE name = %s", ["exec-one"], fetch_one=True)
         assert row is not None
         assert row["value"] == 66
 
@@ -397,6 +400,7 @@ class TestExecute:
 # ────────────────────────────────────────────────────────────────────────────
 # TRANSACTIONS
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestTransactions:
     def test_commit(self, pg_sql):
@@ -434,13 +438,14 @@ class TestTransactions:
         data = fresh("tx-vis", 99)
         pg_sql.insert(TABLE, data, tx=tx)
         rows = pg_sql.select(TABLE, {"id": data["id"]}, tx=tx)
-        assert len(rows) == 1          # visible within same tx
+        assert len(rows) == 1  # visible within same tx
         pg_sql.rollback(tx)
 
 
 # ────────────────────────────────────────────────────────────────────────────
 # DISTRIBUTED LOCK
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestDistributedLock:
     def test_lock_acquired_and_released(self, pg_sql):
@@ -470,7 +475,7 @@ class TestDistributedLock:
         t1 = threading.Thread(target=worker, args=("T1", 0.2))
         t2 = threading.Thread(target=worker, args=("T2", 0.05))
         t1.start()
-        time.sleep(0.05)   # give T1 time to grab lock
+        time.sleep(0.05)  # give T1 time to grab lock
         t2.start()
         t1.join(timeout=5)
         t2.join(timeout=5)
@@ -478,12 +483,11 @@ class TestDistributedLock:
         assert not errors, errors
         # The enter/exit pairs must not interleave
         t1_enter = log.index("T1-enter")
-        t1_exit  = log.index("T1-exit")
+        t1_exit = log.index("T1-exit")
         t2_enter = log.index("T2-enter")
         assert t1_exit < t2_enter, f"Interleaved: {log}"
 
     def test_lock_released_on_exception(self, pg_sql):
-        
 
         try:
             with pg_sql.distributed_lock("test-exc-lock"):
@@ -501,6 +505,7 @@ class TestDistributedLock:
 # ────────────────────────────────────────────────────────────────────────────
 # CONNECTION POOL concurrency
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestConnectionPool:
     @pytest.mark.slow
@@ -530,6 +535,7 @@ class TestConnectionPool:
     @pytest.mark.slow
     def test_pool_exhaustion_recovers(self, pg_sql):
         """Hold pool connections briefly then release; subsequent ops must succeed."""
+
         def hold_conn() -> None:
             tx = pg_sql.begin_transaction()
             time.sleep(0.3)

@@ -1,24 +1,24 @@
 # src/polydb/adapters/postgres.py
+import base64
+import hashlib
+import json
 import os
 import threading
 import time
-from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
-import hashlib
 from contextlib import contextmanager
-import json
-import base64
+from datetime import date, datetime
 from decimal import Decimal
-from datetime import datetime, date
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import psycopg2.extensions
 from psycopg2 import sql as pg_sql
 from psycopg2.extras import Json
 
-from ..errors import DatabaseError, ConnectionError, InsufficientBalanceError
+from ..errors import ConnectionError, DatabaseError, InsufficientBalanceError
+from ..query import Operator, QueryBuilder
 from ..retry import retry
-from ..utils import validate_table_name, validate_column_name
-from ..query import QueryBuilder, Operator
 from ..types import JsonDict, Lookup
+from ..utils import validate_column_name, validate_table_name
 
 # Postgres session variables this adapter is willing to SET (scoped to one
 # transaction, via set_config(..., is_local=True)) on a caller's behalf.
@@ -89,8 +89,9 @@ class PostgreSQLAdapter:
 
     def _initialize_pool(self):
         try:
+            from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
+
             import psycopg2.pool
-            from urllib.parse import urlparse, parse_qs, quote, urlencode, urlunparse
 
             dsn = self.connection_string
             if "postgresql://" in dsn:
@@ -157,7 +158,9 @@ class PostgreSQLAdapter:
             if pct > 80:
                 self.logger.warning(
                     "PostgreSQL pool utilization: %d/%d connections in use (%.0f%%)",
-                    used_count, maxconn, pct,
+                    used_count,
+                    maxconn,
+                    pct,
                 )
         except Exception:
             pass
@@ -212,7 +215,10 @@ class PostgreSQLAdapter:
         if duration_ms > self._slow_query_ms:
             self.logger.warning(
                 "Slow query detected: operation=%s table=%s duration_ms=%.1f threshold=%.1f",
-                operation, table, duration_ms, self._slow_query_ms,
+                operation,
+                table,
+                duration_ms,
+                self._slow_query_ms,
             )
 
         return duration_ms
@@ -779,6 +785,7 @@ class PostgreSQLAdapter:
     @property
     def capabilities(self):
         from ..models import BackendCapabilities
+
         return BackendCapabilities(
             server_order=True,
             server_filter=True,
@@ -814,7 +821,7 @@ class PostgreSQLAdapter:
 
         has_more = len(results) > request.limit
         if has_more:
-            results = results[:request.limit]
+            results = results[: request.limit]
 
         next_cursor = None
         if has_more:

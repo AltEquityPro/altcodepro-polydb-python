@@ -171,6 +171,41 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.12** — Phase 1, first two tier-2 gaps closed:
+  - **CI**, closing known-gap 6: `.github/workflows/ci.yml` — `lint` (black/isort blocking, flake8
+    blocking, mypy report-only pending the python-version-metadata cleanup in known-gap 4),
+    `security` (pip-audit + gitleaks, both report-only until a first pass is triaged), `test`
+    (Postgres/Mongo/Redis service containers, `pytest -m "postgresql or mongodb or vercel"`).
+    `multi_engine` deliberately excluded — see known-gap 14. Added `.flake8` (flake8 has no native
+    `pyproject.toml` support; `max-line-length = 100` + `E203`/`W503`/`E501` ignored to match
+    black's own settings and its own line-wrapping authority).
+  - **`decorators.py` deleted**, closing known-gap 2 — confirmed nothing imported it first.
+  - The repo-wide black/isort/flake8 pass needed to make the new `lint` job start green (not a
+    known-broken placeholder) surfaced two real bugs, both fixed and covered by new tests:
+    - `VercelQueueAdapter` never extended `QueueAdapter(ABC)` the way every sibling adapter
+      (SQS/Azure/RabbitMQ) does, even though `send`/`receive`/`delete` already satisfy every
+      abstract method it requires — an unused `from ..base.QueueAdapter import QueueAdapter` was
+      the flake8 finding that surfaced it. Meant `nack`/`purge`/`declare`/`status`/`extend`/
+      `delay`/`cancel` fell through to a plain `AttributeError` instead of the base's own
+      intentional, named `NotImplementedError`, and the class silently opted out of
+      `isinstance(adapter, QueueAdapter)` checks. Fixed by extending the base and calling
+      `super().__init__()`; `tests/test_vercel.py::TestVercelQueue` (new) proves both.
+    - `HealthCheck.check_cache_health()` ([monitoring.py](src/polydb/monitoring.py)) wrote a test
+      value into the cache, read it back into `retrieved`, and never actually compared the two —
+      `set()`/`get()` not raising is not the same thing as the cache round-tripping the value
+      correctly, so a cache silently returning stale/empty/wrong data still reported `{"status":
+      "healthy"}`. Fixed by comparing `retrieved` against what was written and reporting
+      `unhealthy` with a clear mismatch message on a miss. `tests/test_monitoring_health.py` (new)
+      reproduces the pre-fix blind spot with a fake cache that "succeeds" but returns the wrong
+      value.
+  - Every other flake8 finding (unused imports, a handful of unused local variables that were
+    genuinely never read anywhere — not wired-up-but-dead audit scaffolding worth investing in
+    right now, forward-referenced return-type annotations flagged `F821` under this repo's own
+    deliberate "don't import cloud SDKs at module level" convention, two stray `f""` strings with
+    no placeholder, some trailing whitespace inside a SQL literal) was mechanical cleanup with zero
+    behavior change, confirmed via a full before/after test-suite diff against this exact commit
+    (`git stash`/`pop`) — byte-for-byte identical pass/fail/skip/error counts either side.
+
 - **2.5.11** — Phase 0 hardening: four reproduced gaps in the NoSQL KV layer, all closed together
   since they share the same overflow/adapter-vending code paths.
   - [`NoSQLKVAdapter.put()`](src/polydb/base/NoSQLKVAdapter.py) now calls `_check_overflow()` before
@@ -379,43 +414,52 @@ Ordered roughly by impact. None of these are in-flight; treat as a backlog.
    entrypoint" — users must `from polydb.PolyDB import PolyDB`. Also unexported: `QueryHelper`,
    `AdvancedQueryBuilder`, `EngineConfig`, `EngineOverride`, `TenantConfig`, `SchemaBuilder`,
    `MetricsCollector`, `FieldEncryption`, `PageRequest`/`PageResult`.
-2. **`decorators.py` is a 1040-line orphaned duplicate of `databaseFactory.py`.** Nothing imports
-   it; it defines a second, older `DatabaseFactory`/`EngineConfig`. Delete it — it is a live trap
-   for anyone grepping for `class DatabaseFactory`.
-3. **Packaging: the optional-extras design is defeated by the core `dependencies` list.** boto3,
+2. **Packaging: the optional-extras design is defeated by the core `dependencies` list.** boto3,
    five azure-* packages, four google-cloud-* packages, pymongo, web3 and ipfshttpclient are all
    *required*, so `pip install altcodepro-polydb-python` pulls every cloud SDK and the extras are
    decorative. `build` and `twine` are also listed as runtime dependencies. Core should be
    psycopg2-binary + tenacity + python-dotenv (+ redis).
-4. **Python-version metadata is inconsistent.** `requires-python = ">=3.11"` vs classifiers
+3. **Python-version metadata is inconsistent.** `requires-python = ">=3.11"` vs classifiers
    advertising 3.8–3.10, `[tool.mypy] python_version = "3.8"`, and black `target-version` py38+.
-   Pick 3.11 everywhere.
-5. **`ModelRegistry` ([registry.py](src/polydb/registry.py)) is dead code** — defined, documented,
+   Pick 3.11 everywhere. (This is also why `.github/workflows/ci.yml`'s own mypy step is
+   report-only rather than blocking, and black itself warns on every run in a 3.11 environment —
+   see that workflow's own comments.)
+4. **`ModelRegistry` ([registry.py](src/polydb/registry.py)) is dead code** — defined, documented,
    never imported. Either wire it into `_extract_meta()` (it is the only path that supports
    `register_dynamic()` schema-driven models) or drop it.
-6. **No CI.** No `.github/workflows` — no lint, type-check, test, or publish automation, and no
-   dependency/secret scanning on a repo that ships credential-handling code.
-7. **No async API.** Everything is synchronous (`ComplianceService` is the lone `async def`), which
+5. **No async API.** Everything is synchronous (`ComplianceService` is the lone `async def`), which
    rules out FastAPI/asyncio callers except via thread pools. A documented stance ("sync only, wrap
    in `run_in_executor`") would at least set expectations.
-8. **Two competing pytest configs.** Both `pytest.ini` and `[tool.pytest.ini_options]` exist with
+6. **Two competing pytest configs.** Both `pytest.ini` and `[tool.pytest.ini_options]` exist with
    different `addopts`; `pytest.ini` wins, so the coverage flags in `pyproject.toml` never apply.
-9. **Docs drift.** [README.md](README.md)'s "Project Structure" describes `adapters/aws/`,
+7. **Docs drift.** [README.md](README.md)'s "Project Structure" describes `adapters/aws/`,
    `core/`, `security/` package directories that do not exist, and BUILD_GUIDE.md lists
    `database.py` / `factory.py`. Neither documents the `PolyDB` facade or the env-var contract
    (`POLYDB_ENCRYPTION_KEY*`, `POLYDB_AUDIT_HMAC_KEY`, `POLYDB_SLOW_QUERY_MS`,
-   `POLYDB_QUEUE_VISIBILITY_TIMEOUT`, `REDIS_CACHE_URL`, `CLOUD_PROVIDER`).
-10. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
-    SECURITY.md, issue/PR templates, or code of conduct, and no published API reference.
-11. **Typo in extra name:** `bolckchain` should be `blockchain` (rename, keeping the old key as an
-    alias for one release).
-12. **Azure Table's overflow threshold still doesn't consult `self.max_size`.** Azure branches on
+   `POLYDB_QUEUE_VISIBILITY_TIMEOUT`, `REDIS_CACHE_URL`, `CLOUD_PROVIDER`). Also: `Readme_Integration_
+   Tests.md` documents copying `tests/.env.test` for the local emulator ports, but that file doesn't
+   actually exist in the repo — `.github/workflows/ci.yml`'s own `test` job sets the equivalent env
+   vars directly instead of depending on it.
+8. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
+   SECURITY.md, issue/PR templates, or code of conduct, and no published API reference.
+9. **Typo in extra name:** `bolckchain` should be `blockchain` (rename, keeping the old key as an
+   alias for one release).
+10. **Azure Table's overflow threshold still doesn't consult `self.max_size`.** Azure branches on
     its own hard-coded `MAX_PROPERTY_CHARS = 30 * 1024` instead; `AZURE_TABLE_MAX_SIZE = 60 * 1024`
     is set on `self.max_size` and never read. Two different thresholds, neither of them the one in
     the base class's own comment (which says "1MB"). Narrower than the fixed 2.5.11 gap (`put()`
     skipping overflow entirely) — this one is Azure's per-property granularity being on a separate
     code path from the base class by design (see the overflow table above), just not yet unified
     on a single configured threshold.
-13. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, `architecture/`, `token.txt`
+11. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, `architecture/`, `token.txt`
     and a checked-in `dist/` are dev scratch in the project root. `.env`/`token.txt` are correctly
     gitignored and untracked — keep it that way.
+12. **`tests/test_multi_engine.py::TestSingleEngine` is broken test-suite drift, excluded from CI.**
+    Its own `_patch_factory` helper calls `db._meta(...)`/`db._model_type(...)` — neither exists on
+    `DatabaseFactory` today; meta extraction is the module-level `_extract_meta()` function
+    (confirmed by reading `databaseFactory.py` directly), not an instance method, so every test in
+    that class fails with a plain `AttributeError`. Pre-existing (confirmed via a before/after
+    `git stash` diff against 2.5.12's own CI-adding changeset — byte-for-byte identical failure
+    either side), not something CI introduced; `.github/workflows/ci.yml`'s own `test` job excludes
+    the `multi_engine` marker entirely until this is fixed for real, rather than shipping a gate
+    that's red from day one on an unrelated bug.

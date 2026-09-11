@@ -8,10 +8,10 @@ import threading
 from typing import Any, Dict, List, Optional
 
 from ..base.NoSQLKVAdapter import NoSQLKVAdapter
-from ..errors import NoSQLError, ConnectionError, DatabaseError
+from ..errors import ConnectionError, DatabaseError, NoSQLError
+from ..models import PartitionConfig
 from ..retry import retry
 from ..types import JsonDict
-from ..models import PartitionConfig
 
 
 def _as_literal(value: Any) -> Any:
@@ -122,9 +122,7 @@ class MongoDBAdapter(NoSQLKVAdapter):
                 return
 
             try:
-                collection.create_index(
-                    [("_pk", 1), ("_rk", 1)], unique=True, name="pk_rk_unique"
-                )
+                collection.create_index([("_pk", 1), ("_rk", 1)], unique=True, name="pk_rk_unique")
             except Exception:
                 self.logger.warning(
                     "Could not ensure (_pk, _rk) index on %s",

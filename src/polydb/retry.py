@@ -3,9 +3,9 @@
 Retry logic with exponential backoff and metrics hooks
 """
 
+import logging
 import os
 import time
-import logging
 from functools import wraps
 from typing import Callable, Tuple, Type
 

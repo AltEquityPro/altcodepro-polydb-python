@@ -10,6 +10,7 @@ the lower-friction choice specifically for this adapter. If LocalStack
 becomes the project-wide standard for AWS integration tests, this should
 move to match test_aws.py's convention instead of being the odd one out.
 """
+
 from __future__ import annotations
 
 import uuid

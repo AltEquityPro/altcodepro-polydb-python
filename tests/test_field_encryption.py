@@ -23,19 +23,35 @@ import pytest
 # test_atomic_decrement.py's stubbing approach).
 # ---------------------------------------------------------------------------
 for _mod in [
-    "google", "google.api_core", "google.api_core.exceptions",
-    "google.cloud", "google.cloud.pubsub_v1", "google.cloud.storage",
-    "google.cloud.firestore", "google.cloud.bigquery",
-    "azure", "azure.storage", "azure.storage.blob", "azure.storage.queue",
-    "azure.storage.file", "azure.data", "azure.data.tables",
-    "boto3", "botocore", "botocore.exceptions",
-    "redis", "pymongo",
-    "varint", "baseconv",
+    "google",
+    "google.api_core",
+    "google.api_core.exceptions",
+    "google.cloud",
+    "google.cloud.pubsub_v1",
+    "google.cloud.storage",
+    "google.cloud.firestore",
+    "google.cloud.bigquery",
+    "azure",
+    "azure.storage",
+    "azure.storage.blob",
+    "azure.storage.queue",
+    "azure.storage.file",
+    "azure.data",
+    "azure.data.tables",
+    "boto3",
+    "botocore",
+    "botocore.exceptions",
+    "redis",
+    "pymongo",
+    "varint",
+    "baseconv",
 ]:
     if _mod not in sys.modules:
         sys.modules[_mod] = types.ModuleType(_mod)
 
-_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType("google.api_core.exceptions")
+_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType(
+    "google.api_core.exceptions"
+)
 if not hasattr(_gcp_exc, "AlreadyExists"):
     _gcp_exc.AlreadyExists = type("AlreadyExists", (Exception,), {})
     _gcp_exc.NotFound = type("NotFound", (Exception,), {})

@@ -1,17 +1,15 @@
 # src/polydb/adapters/AzureQueueAdapter.py
 
-import os
-import threading
 import json
+import os
 import re
-
+import threading
 from typing import Any, Dict, List, Optional
-
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
-from ..retry import retry
 from ..json_safe import json_safe
+from ..retry import retry
 
 
 class AzureQueueAdapter(QueueAdapter):

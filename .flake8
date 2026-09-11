@@ -1,0 +1,16 @@
+[flake8]
+# Matches [tool.black]'s line-length = 100 (pyproject.toml) -- flake8 has
+# no native pyproject.toml support without a plugin, so this stays a
+# separate file. E203/W503 are black's own well-known, intentional
+# deviations from PEP 8 (whitespace before ':' in a slice, line break
+# before a binary operator) -- flake8 flagging either against
+# black-formatted code is a false positive, not a real style issue.
+max-line-length = 100
+# E203/W503: black's own well-known, intentional deviations from PEP 8
+# (whitespace before ':' in a slice, line break before a binary operator)
+# -- flagging either against black-formatted code is a false positive.
+# E501: black is the enforced line-length authority and already wraps
+# everything it safely can; the lines that remain over 100 chars are
+# long string literals/URLs black won't break, not real style debt.
+extend-ignore = E203, W503, E501
+exclude = .git,__pycache__,build,dist,*.egg-info,architecture
