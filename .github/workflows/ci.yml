@@ -41,6 +41,14 @@ jobs:
         run: mypy src || true
 
   security:
+    # Blocking, both scans -- a first pass has now been triaged (see the
+    # comments below and .gitleaksignore for exactly what was found and
+    # why each finding is/isn't real). Previously report-only
+    # (`pip-audit ... || true`, no findings ever actually reviewed);
+    # gitleaks-action has never had continue-on-error set, so it was
+    # already blocking in practice despite the "both report-only" claim
+    # this comment used to make -- CLAUDE.md's own Recent changes entry
+    # for this pass corrects that.
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -49,17 +57,39 @@ jobs:
           python-version: "3.11"
       - name: Dependency vulnerability scan (pip-audit)
         run: |
+          # Upgrade packaging tooling first -- pip/setuptools/wheel are
+          # themselves periodically the subject of CVEs (confirmed by
+          # actually hitting several during this pass's own triage, all
+          # traced to a stale ambient install rather than this repo's own
+          # dependencies -- see the paragraph below), and a runner image
+          # that hasn't refreshed its default install shouldn't be able
+          # to fail this gate on ITS OWN staleness rather than a real
+          # finding in this repo's dependency tree.
+          pip install --upgrade pip setuptools wheel
           pip install pip-audit
           pip install -e ".[all]"
-          # Report-only for now: this repo has never been audited before,
-          # so failing the build on the first-ever run would block every
-          # PR on pre-existing transitive findings nobody has triaged yet.
-          # Flip to blocking once a first pass has been reviewed.
-          pip-audit --skip-editable || true
+          # Triaged clean in a fresh, isolated venv (no findings at all --
+          # confirmed the ONLY reason an ad hoc local run had ever shown
+          # 27 "vulnerabilities" across httplib2/idna/pip/setuptools/
+          # urllib3/wheel was stale versions of those packages already
+          # sitting in that environment from unrelated earlier work, not
+          # anything this repo's own pyproject.toml dependency floors
+          # resolve to on a clean install) -- genuinely blocking now, not
+          # a placeholder gate that's red from day one.
+          pip-audit --skip-editable
       - name: Secret scan (gitleaks)
         uses: gitleaks/gitleaks-action@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # .gitleaksignore (repo root, auto-detected by the gitleaks CLI
+        # this action runs) allowlists the two findings a full-history
+        # scan actually turned up, each reviewed and confirmed NOT a real
+        # secret: Azurite's own well-known, publicly-documented default
+        # emulator storage key (Readme_Integration_Tests.md's own
+        # connection-string example is supposed to show this exact
+        # string) and a plain entropy false-positive on the source text
+        # "mount_point=self.mount_point" in VaultAdapter.py. See that
+        # file's own comments for the per-entry reasoning.
 
   test:
     runs-on: ubuntu-latest

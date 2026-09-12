@@ -171,6 +171,38 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.13** — The `security` CI job's first-ever triage pass, closing the "report-only until a
+  first pass is triaged" caveat 2.5.12 deliberately left open (see that entry's own `security`
+  bullet below):
+  - **pip-audit**: `pip-audit --skip-editable` is now genuinely blocking (`|| true` removed). A
+    local `pip-audit` run inside this sandbox's own pre-existing, long-lived Python environment
+    had shown 27 "vulnerabilities" across httplib2/idna/pip/setuptools/urllib3/wheel — investigated
+    one by one rather than blindly flipped to blocking: `httplib2`/`pip`/`setuptools`/`wheel` all
+    traced to `/usr/lib/python3/dist-packages`, apt-installed system tooling (`python3-launchpadlib`
+    et al.) with zero relationship to this repo's own dependency tree — confirmed via `pip show
+    --files`/`Required-by` that nothing this repo (or its `[all]` extra) actually depends on pulls
+    in `httplib2` at all. `idna`/`urllib3` were real, but stale copies left in a shared
+    `~/.local/site-packages` from unrelated earlier work in that same long-lived environment, not
+    what this repo's own `pyproject.toml` floors resolve to fresh. Proven by re-running the exact
+    same audit inside a brand-new, throwaway venv (`python -m venv` + `pip install --upgrade pip
+    setuptools wheel` + `pip install -e ".[all,dev,test]"` + `pip-audit`) — genuinely
+    **zero findings**, confirming this repo's own dependency floors were never actually vulnerable;
+    the CI job now also runs `pip install --upgrade pip setuptools wheel` before the audit as cheap
+    insurance against a stale runner image repeating the same false alarm.
+  - **gitleaks**: new [`.gitleaksignore`](.gitleaksignore) allowlists the only two findings a real,
+    full-git-history `gitleaks detect` run turned up, each individually investigated before being
+    added (never a blanket suppression): Azurite's own well-known, publicly-documented default
+    local-emulator storage account key, which `Readme_Integration_Tests.md`'s own connection-string
+    example is supposed to show verbatim (not a credential for any real account), and a plain
+    entropy false-positive in `VaultAdapter.py` on the source text `mount_point=self.mount_point`
+    (a variable reference, not a secret). `gitleaks/gitleaks-action@v2` itself had no
+    `continue-on-error` set even before this pass — it was already failing the job on any
+    unallowlisted finding, so "report-only" undersold its actual behavior; this pass is what
+    finally reviewed what it would find and gave it a real, intentional pass/fail baseline instead
+    of accidentally-blocking-on-whatever-it-happens-to-flag.
+  - Both scans verified clean against the current tree with the fixes above in place before calling
+    this closed — not asserted from the workflow YAML alone.
+
 - **2.5.12** — Phase 1, first two tier-2 gaps closed:
   - **CI**, closing known-gap 6: `.github/workflows/ci.yml` — `lint` (black/isort blocking, flake8
     blocking, mypy report-only pending the python-version-metadata cleanup in known-gap 4),
