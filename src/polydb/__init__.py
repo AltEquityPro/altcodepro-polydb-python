@@ -4,8 +4,9 @@ PolyDB - Enterprise Cloud-Independent Database Abstraction
 Full LINQ support, field-level audit, cache, soft delete, overflow storage
 """
 
-__version__ = "2.5.13"
+__version__ = "2.5.14"
 
+from .aio import AsyncDatabaseFactory, AsyncPolyDB
 from .audit.context import AuditContext
 from .cache import RedisCacheEngine as CacheEngine
 from .cloudDatabaseFactory import CloudDatabaseFactory
@@ -28,9 +29,15 @@ from .errors import (
 )
 from .models import CloudProvider, CosmosMongoConfig, MongoConfig, PartitionConfig
 from .overflow_gc import GCReport, sweep_overflow_blobs
+from .PolyDB import PolyDB
 from .query import Operator, QueryBuilder
 
 __all__ = [
+    # Facade
+    "PolyDB",
+    # Async facade (see aio.py's own module docstring for the design)
+    "AsyncPolyDB",
+    "AsyncDatabaseFactory",
     # Factories
     "CloudDatabaseFactory",
     "DatabaseFactory",

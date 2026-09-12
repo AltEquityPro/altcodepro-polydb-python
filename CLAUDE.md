@@ -44,6 +44,7 @@ Key entry points:
 | [cloudDatabaseFactory.py](src/polydb/cloudDatabaseFactory.py) | Provider detection (`CLOUD_PROVIDER` env or credential sniffing) + adapter cache |
 | [models.py](src/polydb/models.py) | `CloudProvider` enum and one typed `*Config` per adapter |
 | [types.py](src/polydb/types.py) | `ModelMeta` + `SQLAdapter` / `NoSQLKVAdapter` Protocols |
+| [aio.py](src/polydb/aio.py) | `AsyncPolyDB` / `AsyncDatabaseFactory` -- thread-pool-backed async wrappers over the sync `PolyDB`/`DatabaseFactory` |
 
 Models are plain classes carrying a `__polydb__` dict (`storage`, `table`/`collection`, `pk_field`,
 `rk_field`, `provider`, `cache`, `cache_ttl`); `_extract_meta()` turns that into `ModelMeta`, which
@@ -157,8 +158,15 @@ uv sync                            # or: pip install -e ".[all,dev,test]"
 docker compose -f docker-compose.test.yml up -d
 pytest -m postgresql               # markers: postgresql mongodb azure aws gcp vercel multi_engine slow
 black src tests && isort src tests && flake8 src
-python -m build                    # dist/ artifacts; twine upload dist/*
+python -m build                    # dist/ artifacts; only for local inspection now --
+                                    # publishing itself is automated, see below
 ```
+
+**Publishing is automated** (2.5.14): [`.github/workflows/publish.yml`](.github/workflows/publish.yml)
+builds and publishes to PyPI automatically whenever `pyproject.toml`'s own `version` changes on a
+push to `main` (via PyPI Trusted Publishing/OIDC -- no token secret in this repo). Bump `version` +
+`__version__` together (Release checklist above), push, and the publish happens on its own -- no
+manual `python -m build`/`twine upload` needed anymore.
 
 See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_Integration_Tests.md).
 
@@ -170,6 +178,71 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 3. Run black/isort and the relevant test markers.
 
 ## Recent changes
+
+- **2.5.14** — Three items, closing known-gaps #1 and #5, plus a real reproduced adapter bug found
+  while testing #5:
+  - **`PolyDB` exported from the package root**, closing known-gap #1 — `from polydb import PolyDB`
+    now works (previously `from polydb.PolyDB import PolyDB` only). `AsyncPolyDB`/
+    `AsyncDatabaseFactory` (next bullet) are exported alongside it. The rest of known-gap #1's own
+    list (`QueryHelper`, `AdvancedQueryBuilder`, `EngineConfig`, `EngineOverride`, `TenantConfig`,
+    `SchemaBuilder`, `MetricsCollector`, `FieldEncryption`, `PageRequest`/`PageResult`) is still
+    unexported — narrower, deliberate scope this round, not a claim the whole gap is closed.
+  - **Async API, closing known-gap #5** — new [`aio.py`](src/polydb/aio.py): `AsyncPolyDB`/
+    `AsyncDatabaseFactory` wrap the real, unchanged, synchronous `PolyDB`/`DatabaseFactory` and run
+    every one of their methods via `asyncio.to_thread` (or a dedicated `ThreadPoolExecutor` when
+    `max_workers` is given), returning an awaitable — the same "wrap a blocking DB-API driver in a
+    thread pool" pattern `encode/databases` and Starlette's own docs recommend, not a novel trick.
+    **The documented stance, stated plainly in that module's own top comment**: a genuinely native
+    async rewrite (asyncpg/aioboto3/motor/etc. replacing psycopg2/boto3/pymongo/pika/kafka-python
+    across every adapter) would mean a from-scratch, parallel adapter layer roughly doubling this
+    package's own maintenance surface — real, much larger, separate future work this round
+    deliberately does NOT attempt. What this round DOES deliver: any FastAPI/asyncio caller can use
+    PolyDB today without blocking the event loop, via `AsyncPolyDB`/`AsyncDatabaseFactory`, zero
+    changes to the existing sync `PolyDB`/`DatabaseFactory`/adapters (every existing synchronous
+    caller is completely unaffected). One generic `_AsyncProxy` base class covers both wrapper
+    types via `__getattr__` (cached per-attribute) rather than hand-duplicating ~65 method
+    signatures from `PolyDB` + ~30 from `DatabaseFactory`; non-callable attributes pass through
+    synchronously (never wrapped/awaited). Proven end to end against real Postgres in
+    `tests/test_async_api.py` (10 tests) — not just that the wrapper's own dispatch logic looks
+    right in isolation: a real `create`/`read`/`update`/`delete` round trip through both wrapper
+    types, wrapping an already-constructed sync instance vs. building one internally, non-callable
+    pass-through, a real thread-identity proof that calls genuinely run off the event-loop's own
+    thread, a dedicated-executor lifecycle proof (`close()`/`async with`), and a real wall-clock
+    timing proof that N concurrent awaited calls (each with an injected `time.sleep`) complete in
+    roughly one sleep's worth of time, not N sleeps -- proving genuine overlap, not serialization
+    behind a hidden lock.
+  - **Real, reproduced bug found and fixed while writing `tests/test_async_api.py`'s own fixtures**
+    (unrelated to async itself -- surfaced by routine use of the existing `tests/test_postgresql.py`
+    fixtures, `git stash` confirms it pre-dates this round): `PostgreSQLAdapter._serialize_value`
+    (used by `insert`/`update`/`upsert`) unconditionally `Json()`-wrapped every `list`/`tuple`
+    value, turning a plain Python list meant for a real Postgres `TEXT[]` column into a JSON string
+    literal (`'["x","y"]'`) that Postgres correctly refuses ("malformed array literal") -- meaning
+    `insert`/`update`/`upsert` could never actually write a real array column at all, only JSONB.
+    The sibling `_serialize_param` (used for query parameters, a few lines below in the same file)
+    already had the correct logic -- pass a bare list of scalars through untouched (psycopg2 adapts
+    it to a real Postgres array natively), only `Json()`-wrap a list that itself contains dicts (no
+    Postgres array type holds JSON objects as elements) -- `_serialize_value` just never matched it.
+    Fixed by aligning `_serialize_value` with `_serialize_param`'s exact logic. Verified via
+    `tests/test_postgresql.py::TestInsert::test_insert_text_array_column`, which existed already
+    and was failing before this fix (confirmed via `git stash`), now passes; the full `pytest -m
+    postgresql` suite (69 tests including the 10 new async ones) is green.
+  - New [`.github/workflows/publish.yml`](.github/workflows/publish.yml) automates PyPI publishing
+    on every version bump, closing the maintainer's own manual "bump pyproject.toml, then
+    build+twine-upload by hand" workflow. Triggers on any push to `main` touching `pyproject.toml`;
+    compares this checkout's own `version` against PyPI's currently-published version (via the
+    public, unauthenticated `https://pypi.org/pypi/altcodepro-polydb-python/json` endpoint) rather
+    than requiring a git tag -- **no git tags exist in this repo's history**, so a tag-based trigger
+    would need a second, separate new habit; this trigger matches the human workflow that already
+    exists today, just automated. Uses **PyPI Trusted Publishing (OIDC)** --
+    `pypa/gh-action-pypi-publish@release/v1` with `permissions: id-token: write` and an `environment:
+    pypi` -- so **no `PYPI_API_TOKEN` secret is stored in this repo at all**; the one-time,
+    human-only setup step (documented in the workflow file's own top comment, since no CI job can
+    do it) is adding this repo as a trusted publisher on pypi.org under the project's own
+    Publishing settings. Also gates on `src/polydb/__init__.py`'s `__version__` matching
+    `pyproject.toml`'s `version` before ever attempting a build -- this repo's own documented
+    "Release checklist" requirement, enforced as a real CI check instead of trusted-by-convention.
+    A version-unchanged push (a docs fix, a test-only change) is a correct, fast no-op; re-running
+    for an already-published version is idempotent, never double-publishes.
 
 - **2.5.13** — The `security` CI job's first-ever triage pass, closing the "report-only until a
   first pass is triaged" caveat 2.5.12 deliberately left open (see that entry's own `security`
@@ -441,9 +514,8 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 Ordered roughly by impact. None of these are in-flight; treat as a backlog.
 
-1. **`PolyDB` is not exported from the package root.** [__init__.py](src/polydb/__init__.py)
-   exports the two factories but not the facade the docs call "the primary developer-facing
-   entrypoint" — users must `from polydb.PolyDB import PolyDB`. Also unexported: `QueryHelper`,
+1. **(2.5.14, partially closed)** `PolyDB`/`AsyncPolyDB`/`AsyncDatabaseFactory` are now exported
+   from the package root (`from polydb import PolyDB`). Still unexported: `QueryHelper`,
    `AdvancedQueryBuilder`, `EngineConfig`, `EngineOverride`, `TenantConfig`, `SchemaBuilder`,
    `MetricsCollector`, `FieldEncryption`, `PageRequest`/`PageResult`.
 2. **Packaging: the optional-extras design is defeated by the core `dependencies` list.** boto3,
@@ -459,9 +531,11 @@ Ordered roughly by impact. None of these are in-flight; treat as a backlog.
 4. **`ModelRegistry` ([registry.py](src/polydb/registry.py)) is dead code** — defined, documented,
    never imported. Either wire it into `_extract_meta()` (it is the only path that supports
    `register_dynamic()` schema-driven models) or drop it.
-5. **No async API.** Everything is synchronous (`ComplianceService` is the lone `async def`), which
-   rules out FastAPI/asyncio callers except via thread pools. A documented stance ("sync only, wrap
-   in `run_in_executor`") would at least set expectations.
+5. **(2.5.14, closed)** `aio.py`'s `AsyncPolyDB`/`AsyncDatabaseFactory` give FastAPI/asyncio callers
+   a real, tested, thread-pool-backed async API today. The documented stance IS "sync core stays
+   sync, wrap in a thread pool" -- stated in `aio.py`'s own top comment, not left implicit. A
+   genuinely native async rewrite (asyncpg/aioboto3/motor/etc. across every adapter) remains real,
+   separate, much larger future work, explicitly not attempted by this round.
 6. **Two competing pytest configs.** Both `pytest.ini` and `[tool.pytest.ini_options]` exist with
    different `addopts`; `pytest.ini` wins, so the coverage flags in `pyproject.toml` never apply.
 7. **Docs drift.** [README.md](README.md)'s "Project Structure" describes `adapters/aws/`,

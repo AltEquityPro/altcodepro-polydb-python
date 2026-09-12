@@ -319,8 +319,26 @@ class PostgreSQLAdapter:
     def _serialize_value(self, v: Any) -> Any:
         if v is None:
             return None
-        if isinstance(v, (dict, list, tuple)):
+        if isinstance(v, dict):
             return Json(self._json_safe(v))
+        if isinstance(v, (list, tuple)):
+            # A bare list/tuple of scalars is a real Postgres array column
+            # (e.g. TEXT[]) -- psycopg2 adapts a plain Python list to that
+            # natively, so it must pass through untouched here, exactly
+            # like _serialize_param already does for query parameters
+            # (below). Only a list/tuple actually containing dicts is
+            # genuinely JSON-shaped (no Postgres array type holds JSON
+            # objects as elements), so that case alone still gets
+            # Json()-wrapped for a JSONB column. Wrapping every list
+            # unconditionally (the pre-fix behavior) sent a JSON string
+            # literal like '["x","y"]' to any TEXT[] column, which
+            # Postgres correctly refuses ("malformed array literal") --
+            # this insert/update/upsert path silently could never write
+            # a real array column at all.
+            seq = list(v)
+            if any(isinstance(x, dict) for x in seq):
+                return Json(self._json_safe(seq))
+            return seq
         if isinstance(v, (datetime, date)):
             return v
         if isinstance(v, Decimal):
