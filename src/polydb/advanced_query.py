@@ -2,13 +2,14 @@
 """
 Advanced query capabilities: JOIN, subqueries, aggregates
 """
-from typing import List, Optional, Any, Dict
+
+import re
 from dataclasses import dataclass, field
 from enum import Enum
-import re
+from typing import Any, Dict, List, Optional
 
 from .errors import ValidationError
-from .utils import validate_table_name, validate_column_name
+from .utils import validate_column_name, validate_table_name
 
 # table.column / alias.column - each half validated with the same allowlists
 # used elsewhere for identifiers, joined by a single literal dot.
@@ -155,7 +156,7 @@ class AdvancedQueryBuilder:
                 select_parts = list(self.group_by_fields) + select_parts
             sql = f"SELECT {', '.join(select_parts)}"
         else:
-            sql = f"SELECT *"
+            sql = "SELECT *"
 
         # FROM clause
         sql += f" FROM {self.table}"

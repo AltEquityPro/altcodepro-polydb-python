@@ -1,6 +1,7 @@
-from ..utils import setup_logger
 from abc import ABC, abstractmethod
 from typing import Optional
+
+from ..utils import setup_logger
 
 
 class SecretsAdapter(ABC):

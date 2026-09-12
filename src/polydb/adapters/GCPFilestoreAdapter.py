@@ -4,7 +4,7 @@ import os
 from typing import List, Optional
 
 from ..base.SharedFilesAdapter import SharedFilesAdapter
-from ..errors import StorageError, ConnectionError
+from ..errors import ConnectionError, StorageError
 
 
 class FilestoreAdapter(SharedFilesAdapter):

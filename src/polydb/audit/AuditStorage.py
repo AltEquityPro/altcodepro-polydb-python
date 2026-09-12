@@ -4,10 +4,10 @@ from __future__ import annotations
 import hmac
 import threading
 from dataclasses import dataclass
-from typing import Optional, Dict, Any
+from typing import Optional
 
-from .models import AuditRecord
 from ..cloudDatabaseFactory import CloudDatabaseFactory
+from .models import AuditRecord
 
 
 class AuditStorage:
@@ -54,14 +54,14 @@ class AuditStorage:
                 CONSTRAINT uq_audit_chain UNIQUE (tenant_id, previous_hash),
                 created_at TIMESTAMP DEFAULT NOW()
             );
-            
-            CREATE INDEX IF NOT EXISTS idx_audit_tenant_timestamp 
+
+            CREATE INDEX IF NOT EXISTS idx_audit_tenant_timestamp
                 ON polydb_audit_log(tenant_id, timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_audit_model_entity 
+            CREATE INDEX IF NOT EXISTS idx_audit_model_entity
                 ON polydb_audit_log(model, entity_id);
-            CREATE INDEX IF NOT EXISTS idx_audit_actor 
+            CREATE INDEX IF NOT EXISTS idx_audit_actor
                 ON polydb_audit_log(actor_id, timestamp DESC);
-            CREATE INDEX IF NOT EXISTS idx_audit_hash_chain 
+            CREATE INDEX IF NOT EXISTS idx_audit_hash_chain
                 ON polydb_audit_log(tenant_id, timestamp DESC, previous_hash);
             """
 
@@ -74,7 +74,7 @@ class AuditStorage:
         """Get most recent hash with strict ordering (distributed-safe)"""
         with self._lock:
             try:
-                from ..query import QueryBuilder, Operator
+                from ..query import Operator, QueryBuilder
 
                 builder = QueryBuilder()
 
@@ -99,9 +99,10 @@ class AuditStorage:
         and re-chains instead of forking. (threading.Lock alone was only
         process-local — the old "distributed-safe" claim was false.)"""
         from dataclasses import asdict
+
         from .models import (
-            AuditKeyMissingError,
             AUDIT_HMAC_KEY_ENV,
+            AuditKeyMissingError,
             audit_hmac_key,
             compute_audit_hash,
             require_hmac,
@@ -157,9 +158,7 @@ class AuditStorage:
         """Verify BOTH chain linkage AND per-record content integrity."""
         return self.verify_chain_detailed(tenant_id).ok
 
-    def verify_chain_detailed(
-        self, tenant_id: Optional[str] = None
-    ) -> "ChainVerification":
+    def verify_chain_detailed(self, tenant_id: Optional[str] = None) -> "ChainVerification":
         """Verify the chain, reporting *why* rather than only whether.
 
         Two things are checked per record: that it links to its predecessor,
@@ -184,7 +183,7 @@ class AuditStorage:
         as everything after it. ``legacy_records`` reports how much of the
         chain is still resting on that seal.
         """
-        from ..query import QueryBuilder, Operator
+        from ..query import Operator, QueryBuilder
         from .models import audit_hmac_key, compute_audit_hash
 
         builder = QueryBuilder()
@@ -215,13 +214,9 @@ class AuditStorage:
 
             stored = r.get("hash") or ""
 
-            if key is not None and hmac.compare_digest(
-                stored, compute_audit_hash(r, key=key)
-            ):
+            if key is not None and hmac.compare_digest(stored, compute_audit_hash(r, key=key)):
                 seen_keyed = True
-            elif not seen_keyed and hmac.compare_digest(
-                stored, compute_audit_hash(r, key=None)
-            ):
+            elif not seen_keyed and hmac.compare_digest(stored, compute_audit_hash(r, key=None)):
                 # Predates the key. Sealed by the first keyed record that
                 # follows it, so it is only trusted while none has appeared.
                 legacy += 1

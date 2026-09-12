@@ -128,12 +128,8 @@ def test_the_digest_is_still_64_hex_characters(monkeypatch):
 def test_content_changes_still_change_the_digest(monkeypatch):
     monkeypatch.setenv(AUDIT_HMAC_KEY_ENV, KEY)
 
-    assert compute_audit_hash(_record()) != compute_audit_hash(
-        _record(action="read")
-    )
-    assert compute_audit_hash(_record()) != compute_audit_hash(
-        _record(previous_hash="deadbeef")
-    )
+    assert compute_audit_hash(_record()) != compute_audit_hash(_record(action="read"))
+    assert compute_audit_hash(_record()) != compute_audit_hash(_record(previous_hash="deadbeef"))
 
 
 # ── key handling ───────────────────────────────────────────────────────────
@@ -144,9 +140,10 @@ def test_no_key_falls_back_to_the_legacy_digest():
     audit writes sit in the data write path, so hard-failing by default would
     take out every write on a rolling upgrade."""
     assert audit_hmac_key() is None
-    assert compute_audit_hash(_record()) == hashlib.sha256(
-        canonical_audit_payload(_record()).encode()
-    ).hexdigest()
+    assert (
+        compute_audit_hash(_record())
+        == hashlib.sha256(canonical_audit_payload(_record()).encode()).hexdigest()
+    )
 
 
 def test_a_blank_key_counts_as_no_key(monkeypatch):
@@ -164,9 +161,9 @@ def test_the_key_is_read_per_call_so_rotation_needs_no_restart(monkeypatch):
     assert compute_audit_hash(_record()) != first
 
 
-@pytest.mark.parametrize("value,expected", [("1", True), ("true", True),
-                                            ("yes", True), ("0", False),
-                                            ("", False)])
+@pytest.mark.parametrize(
+    "value,expected", [("1", True), ("true", True), ("yes", True), ("0", False), ("", False)]
+)
 def test_the_require_flag_is_explicit(monkeypatch, value, expected):
     monkeypatch.setenv(AUDIT_REQUIRE_HMAC_ENV, value)
 
@@ -177,9 +174,10 @@ def test_an_explicit_key_argument_overrides_the_environment(monkeypatch):
     """Verification needs to compute the other scheme's digest deliberately."""
     monkeypatch.setenv(AUDIT_HMAC_KEY_ENV, KEY)
 
-    assert compute_audit_hash(_record(), key=None) == hashlib.sha256(
-        canonical_audit_payload(_record()).encode()
-    ).hexdigest()
+    assert (
+        compute_audit_hash(_record(), key=None)
+        == hashlib.sha256(canonical_audit_payload(_record()).encode()).hexdigest()
+    )
 
 
 def test_the_canonical_payload_excludes_the_hash_itself():

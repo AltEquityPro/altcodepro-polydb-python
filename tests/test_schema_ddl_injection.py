@@ -19,7 +19,6 @@ import pytest
 from polydb.errors import ValidationError
 from polydb.schema import Column, ColumnType, Index, SchemaBuilder
 
-
 IDENTIFIER_INJECTIONS = [
     "users; DROP TABLE secrets; --",
     "users (x INT); DROP TABLE t; --",
@@ -115,9 +114,7 @@ class TestLegitimateSchemasStillBuild:
                     unique=True,
                 )
             )
-            .add_column(
-                Column(name="role", type=ColumnType.TEXT, default="member")
-            )
+            .add_column(Column(name="role", type=ColumnType.TEXT, default="member"))
             .add_column(Column(name="score", type=ColumnType.INTEGER, default=0))
             .add_column(Column(name="active", type=ColumnType.BOOLEAN, default=True))
         )

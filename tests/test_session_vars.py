@@ -36,8 +36,8 @@ meaning "tenant" by any code in this file. What's proven here:
 from __future__ import annotations
 
 import pytest
-
 from conftest import uid
+
 from polydb.adapters.PostgreSQLAdapter import ALLOWED_SESSION_VARS, PostgreSQLAdapter
 from polydb.databaseFactory import DatabaseFactory
 from polydb.errors import DatabaseError
@@ -152,9 +152,7 @@ class TestTransactionScoping:
     def test_execute_raw_sql_honors_session_vars_within_its_own_transaction(self, pg_sql):
         tx = pg_sql.begin_transaction()
         try:
-            pg_sql.execute(
-                "SELECT 1", tx=tx, session_vars={"app.tenant_id": "tenant-execute"}
-            )
+            pg_sql.execute("SELECT 1", tx=tx, session_vars={"app.tenant_id": "tenant-execute"})
             val = pg_sql.execute(
                 "SELECT current_setting('app.tenant_id', true) AS v", tx=tx, fetch_one=True
             )["v"]
@@ -201,9 +199,7 @@ class TestPooledConnectionDoesNotLeak:
             conn2.commit()
             adapter._return_connection(conn2)
 
-            assert not leaked, (
-                f"session var leaked across pooled-connection reuse: {leaked!r}"
-            )
+            assert not leaked, f"session var leaked across pooled-connection reuse: {leaked!r}"
         finally:
             adapter.reset_pool()
 
@@ -220,7 +216,9 @@ class TestPooledConnectionDoesNotLeak:
             row = adapter.execute(
                 "SELECT current_setting('app.tenant_id', true) AS v", fetch_one=True
             )
-            assert not row["v"], f"tenant-a's session var leaked into an unrelated call: {row['v']!r}"
+            assert not row[
+                "v"
+            ], f"tenant-a's session var leaked into an unrelated call: {row['v']!r}"
         finally:
             adapter.reset_pool()
 
@@ -246,7 +244,9 @@ class TestDatabaseFactoryThreadsSessionVars:
             recorded.append(("insert", session_vars))
             return original_insert(self, table, data, tx, session_vars=session_vars)
 
-        def spy_select(self, table, query=None, limit=None, offset=None, tx=None, *, session_vars=None):
+        def spy_select(
+            self, table, query=None, limit=None, offset=None, tx=None, *, session_vars=None
+        ):
             recorded.append(("select", session_vars))
             return original_select(
                 self, table, query, limit=limit, offset=offset, tx=tx, session_vars=session_vars

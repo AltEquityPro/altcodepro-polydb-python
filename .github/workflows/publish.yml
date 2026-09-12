@@ -1,0 +1,129 @@
+# Automates PyPI publishing on every version bump -- closes the manual
+# "I push whenever I bump the toml version" workflow the maintainer
+# described. No git tags exist in this repo's history (confirmed before
+# writing this) and there is no separate release process, so the trigger
+# is deliberately "pyproject.toml's own `version` changed on `main`", not
+# a tag push -- that is the actual, existing signal a human already acts
+# on, just automated instead of run by hand with `python -m build` +
+# `twine upload`.
+#
+# Uses PyPI Trusted Publishing (OIDC, PEP 740/pypa/gh-action-pypi-publish)
+# -- no PYPI_API_TOKEN secret lives in this repo at all. The one-time,
+# human-only setup step this requires (documented here since no amount of
+# automation can do it from inside a CI job): on pypi.org, sign in as the
+# altcodepro-polydb-python project owner -> Manage project -> Publishing
+# -> "Add a new pending publisher" (or, once a first version already
+# exists on PyPI, "Publishers" under project settings) with:
+#   PyPI Project Name:   altcodepro-polydb-python
+#   Owner:               AltEquityPro  (this repo's real GitHub org, per
+#                         `git remote -v` -- not the `altcodepro` name
+#                         CLAUDE.md's own repo URL uses, which is stale)
+#   Repository name:     altcodepro-polydb-python  (this repo's own name)
+#   Workflow name:       publish.yml
+#   Environment name:    pypi  (must match the `environment:` below)
+# Once that's saved, this workflow can publish with zero secrets, ever,
+# and a leaked Actions log can't leak a credential that doesn't exist.
+#
+# Version-change detection compares this checkout's pyproject.toml
+# against PyPI's own published `version` (via the public JSON API,
+# unauthenticated) rather than requiring a git tag -- so a push that
+# doesn't touch `version` (a docs fix, a test-only change) is a correct,
+# fast no-op, and re-running this workflow for an already-published
+# version is idempotent (skips, never fails or double-publishes).
+name: Publish to PyPI
+
+on:
+  push:
+    branches: [main]
+    paths: ["pyproject.toml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Grants the OIDC id-token this job presents to PyPI as proof of
+    # "this really is a run of altcodepro/polydb-python's own publish.yml
+    # on main" -- the entire trust basis of Trusted Publishing, and the
+    # reason no token secret is configured anywhere in this repo.
+    permissions:
+      id-token: write
+    environment:
+      name: pypi
+      url: https://pypi.org/p/altcodepro-polydb-python
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Read this checkout's own pyproject.toml version
+        id: local
+        run: |
+          python -c "
+          import tomllib
+          with open('pyproject.toml', 'rb') as f:
+              print('version=' + tomllib.load(f)['project']['version'])
+          " >> "$GITHUB_OUTPUT"
+
+      - name: Read PyPI's currently published version (unauthenticated, may be absent on a first-ever publish)
+        id: published
+        run: |
+          set -e
+          STATUS=$(curl -s -o /tmp/pypi.json -w '%{http_code}' https://pypi.org/pypi/altcodepro-polydb-python/json)
+          if [ "$STATUS" = "404" ]; then
+            echo "version=" >> "$GITHUB_OUTPUT"
+          else
+            python -c "
+            import json
+            with open('/tmp/pypi.json') as f:
+                print('version=' + json.load(f)['info']['version'])
+            " >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Decide whether this is a real version bump
+        id: decide
+        run: |
+          if [ "${{ steps.local.outputs.version }}" = "${{ steps.published.outputs.version }}" ]; then
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+            echo "pyproject.toml version (${{ steps.local.outputs.version }}) already matches the version published on PyPI -- nothing to do."
+          else
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+            echo "New version detected: ${{ steps.published.outputs.version }} (published) -> ${{ steps.local.outputs.version }} (this checkout)."
+          fi
+
+      # Deliberately checked as a real gate here, not left to Publishing's
+      # own after-the-fact validation -- catches a version bump pushed
+      # without also bumping src/polydb/__init__.py's __version__ (this
+      # repo's own documented "Release checklist" requirement) before
+      # ever spending a PyPI upload attempt on it.
+      - name: Confirm __version__ matches pyproject.toml (this repo's own release checklist)
+        if: steps.decide.outputs.publish == 'true'
+        run: |
+          python -c "
+          import re
+          with open('src/polydb/__init__.py') as f:
+              content = f.read()
+          match = re.search(r'__version__\s*=\s*[\'\"]([^\'\"]+)[\'\"]', content)
+          dunder = match.group(1) if match else None
+          pyproject = '${{ steps.local.outputs.version }}'
+          if dunder != pyproject:
+              raise SystemExit(
+                  f'src/polydb/__init__.py __version__={dunder!r} does not match '
+                  f'pyproject.toml version={pyproject!r} -- fix before publishing.'
+              )
+          print(f'__version__ matches pyproject.toml: {pyproject}')
+          "
+
+      - name: Build sdist and wheel
+        if: steps.decide.outputs.publish == 'true'
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build
+
+      - name: Publish to PyPI
+        if: steps.decide.outputs.publish == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1

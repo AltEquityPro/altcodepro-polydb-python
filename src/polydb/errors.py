@@ -2,6 +2,7 @@
 """
 Structured exceptions for cloud database operations
 """
+
 from __future__ import annotations
 
 
@@ -51,6 +52,7 @@ class ValidationError(CloudDBError):
     """Input validation failed"""
 
     pass
+
 
 class PolyDBError(Exception):
     """Base exception for polydb."""

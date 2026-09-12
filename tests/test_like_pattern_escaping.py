@@ -13,7 +13,6 @@ import pytest
 
 from polydb.query import Operator, QueryBuilder
 
-
 ESCAPE_CLAUSE = "LIKE %s ESCAPE '\\'"
 
 
@@ -36,9 +35,7 @@ class TestMetacharactersAreEscaped:
         assert params == [expected]
 
     def test_leading_wildcard_cannot_be_forced_on_a_prefix_scan(self):
-        _, params = (
-            QueryBuilder().where("name", Operator.STARTS_WITH, "%").to_sql_where()
-        )
+        _, params = QueryBuilder().where("name", Operator.STARTS_WITH, "%").to_sql_where()
 
         assert not params[0].startswith("%")
 

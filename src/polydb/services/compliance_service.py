@@ -70,7 +70,8 @@ class ComplianceService:
                 logger.critical(
                     "compliance.audit_failure retry queue full — event dropped: "
                     "event_type=%s tenant_id=%s",
-                    event.event_type, event.tenant_id,
+                    event.event_type,
+                    event.tenant_id,
                 )
 
     async def start(self, *, writer: WriterFn) -> None:
@@ -122,14 +123,19 @@ class ComplianceService:
                     logger.critical(
                         "compliance.audit_failure retry queue full on re-enqueue — event lost: "
                         "event_type=%s tenant_id=%s",
-                        event.event_type, event.tenant_id,
+                        event.event_type,
+                        event.tenant_id,
                     )
 
     def _record_failure(self, event: AuditEvent, exc: Exception, step: str) -> None:
         logger.error(
             "compliance.audit_failure step=%s event_type=%s tenant_id=%s resource=%s/%s error=%s",
-            step, event.event_type, event.tenant_id,
-            event.resource_type, event.resource_id, exc,
+            step,
+            event.event_type,
+            event.tenant_id,
+            event.resource_type,
+            event.resource_id,
+            exc,
         )
         if self._metrics:
             try:

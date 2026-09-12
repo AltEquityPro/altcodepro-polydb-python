@@ -31,8 +31,14 @@ class _FakeTableClient:
         return list(self.entities) if query_filter is None else []
 
 
-_STRAY = [{"PartitionKey": "t1", "RowKey": "user@x.com",
-           "__polydb_model__": "User", "email": "user@x.com"}]
+_STRAY = [
+    {
+        "PartitionKey": "t1",
+        "RowKey": "user@x.com",
+        "__polydb_model__": "User",
+        "email": "user@x.com",
+    }
+]
 
 
 def _adapter(fake):
@@ -44,14 +50,14 @@ def _adapter(fake):
 def test_none_valued_filter_matches_nothing():
     fake = _FakeTableClient(_STRAY)
     res = _adapter(fake)._query_raw(_Model, {"tier": None}, 1)
-    assert res == []                      # no stray record
-    assert fake.calls == []               # and no full-table scan was issued
+    assert res == []  # no stray record
+    assert fake.calls == []  # and no full-table scan was issued
 
 
 def test_empty_filter_lists_all():
     fake = _FakeTableClient(_STRAY)
     res = _adapter(fake)._query_raw(_Model, {}, 10)
-    assert fake.calls == [None]           # genuine list-all
+    assert fake.calls == [None]  # genuine list-all
     assert len(res) == 1
 
 
@@ -67,4 +73,4 @@ def test_query_paged_none_valued_filter_matches_nothing():
     fake = _FakeTableClient(_STRAY)
     page = _adapter(fake).query_paged(_Model, PageRequest(filters={"tier": None}, limit=10))
     assert page.items == [] and page.has_more is False
-    assert fake.calls == []               # short-circuited before any scan
+    assert fake.calls == []  # short-circuited before any scan

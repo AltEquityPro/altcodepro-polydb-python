@@ -1,17 +1,31 @@
-import os
 import json
-import requests
+import os
+from typing import Any, Dict, List, Optional
+
 import redis
-from typing import Dict, Any, List, Optional
+import requests
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import QueueError
 from ..retry import retry
 
 
-class VercelQueueAdapter:
+class VercelQueueAdapter(QueueAdapter):
+    """Every sibling queue adapter (SQS/Azure/RabbitMQ) extends the real
+    QueueAdapter(ABC) contract -- this one didn't (a real, found-while-
+    adding-CI-lint drift, not a deliberate design choice: `send`/
+    `receive`/`delete` below already satisfy every abstract method the
+    base requires). Without it, `nack`/`purge`/`declare`/`status`/
+    `extend`/`delay`/`cancel` fell through to a plain AttributeError
+    instead of the base's own intentional, well-named
+    NotImplementedError('VercelQueueAdapter does not implement ...') --
+    and this class silently opted out of `isinstance(adapter,
+    QueueAdapter)` checks. `super().__init__()` is a no-op beyond setting
+    `self.logger` (unused here today, same as every other adapter's own
+    inherited logger until something actually calls it)."""
 
     def __init__(self, url: str = "", token: str = ""):
+        super().__init__()
         self.url = url or os.getenv("KV_REST_API_URL")
         self.token = token or os.getenv("KV_REST_API_TOKEN")
 

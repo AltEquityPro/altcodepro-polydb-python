@@ -25,8 +25,8 @@ import pytest
 
 from polydb.adapters.PostgreSQLAdapter import PostgreSQLAdapter
 from polydb.cloudDatabaseFactory import CloudDatabaseFactory
-from polydb.models import CloudProvider
-
+from polydb.errors import UnsupportedStorageTypeError
+from polydb.models import CloudProvider, PartitionConfig
 
 # ────────────────────────────────────────────────────────────────────────────
 # Helpers
@@ -296,3 +296,94 @@ class TestFactoryIndependence:
 
         assert pg_factory.provider == CloudProvider.POSTGRESQL
         assert mongo_factory.provider == CloudProvider.MONGODB
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 0 fix: get_nosql_kv() cache key must include partition_config
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Before the fix, self.instances was keyed by `name` alone: a second call to
+# get_nosql_kv(partition_config=Y, name="kv") after a first call with
+# partition_config=X silently returned the first adapter, config Y thrown
+# away. This is the failure mode CLAUDE.md's known gap #6 describes.
+
+
+def _bare_vercel_factory() -> CloudDatabaseFactory:
+    """VercelKVAdapter connects lazily (redis.from_url doesn't dial until
+    the first command, and the REST-API path makes no call at all at
+    construction time), so unlike Mongo/Azure/AWS/GCP this provider needs
+    no live backend or env config just to exercise cache identity."""
+    return CloudDatabaseFactory(provider=CloudProvider.VERCEL)
+
+
+class TestNoSQLKVAdapterCache:
+    def test_two_different_partition_configs_under_the_same_name_get_different_adapters(self):
+        factory = _bare_vercel_factory()
+        pc_a = PartitionConfig(partition_key_template="tenant_a_{id}")
+        pc_b = PartitionConfig(partition_key_template="tenant_b_{id}")
+
+        adapter_a = factory.get_nosql_kv(partition_config=pc_a, name="kv")
+        adapter_b = factory.get_nosql_kv(partition_config=pc_b, name="kv")
+
+        assert adapter_a is not adapter_b
+        assert adapter_a.partition_config.partition_key_template == "tenant_a_{id}"
+        assert adapter_b.partition_config.partition_key_template == "tenant_b_{id}"
+
+    def test_the_identical_partition_config_under_the_same_name_is_cached(self):
+        factory = _bare_vercel_factory()
+        pc = PartitionConfig(partition_key_template="tenant_{id}")
+
+        adapter_1 = factory.get_nosql_kv(partition_config=pc, name="kv")
+        adapter_2 = factory.get_nosql_kv(
+            partition_config=PartitionConfig(partition_key_template="tenant_{id}"), name="kv"
+        )
+
+        assert adapter_1 is adapter_2
+
+    def test_no_partition_config_is_its_own_stable_cache_slot(self):
+        factory = _bare_vercel_factory()
+        adapter_1 = factory.get_nosql_kv(name="kv")
+        adapter_2 = factory.get_nosql_kv(name="kv")
+        adapter_3 = factory.get_nosql_kv(
+            partition_config=PartitionConfig(partition_key_template="x_{id}"), name="kv"
+        )
+
+        assert adapter_1 is adapter_2
+        assert adapter_1 is not adapter_3
+
+    def test_different_names_remain_independent_regardless_of_partition_config(self):
+        factory = _bare_vercel_factory()
+        pc = PartitionConfig(partition_key_template="tenant_{id}")
+        adapter_kv = factory.get_nosql_kv(partition_config=pc, name="kv")
+        adapter_other = factory.get_nosql_kv(partition_config=pc, name="other")
+
+        assert adapter_kv is not adapter_other
+
+
+# ────────────────────────────────────────────────────────────────────────────
+# Phase 0 fix: get_nosql_kv() must raise for a provider with no KV adapter
+# ────────────────────────────────────────────────────────────────────────────
+#
+# Before the fix, an unmatched CloudProvider (POSTGRESQL, S3_COMPATIBLE, ...)
+# fell all the way to the bare `else` branch and silently built a
+# MongoDBAdapter("", "") -- a client pointed at an empty URI that would fail
+# obscurely on first real use instead of here, with a message naming the
+# actual problem. CLAUDE.md's known gap #7.
+
+
+class TestNoSQLKVProviderFallback:
+    def test_postgresql_provider_raises_a_named_error_instead_of_silently_using_mongo(self):
+        factory = CloudDatabaseFactory(provider=CloudProvider.POSTGRESQL)
+
+        with pytest.raises(UnsupportedStorageTypeError, match="postgresql"):
+            factory.get_nosql_kv()
+
+    def test_s3_compatible_provider_raises_a_named_error(self):
+        factory = CloudDatabaseFactory(provider=CloudProvider.S3_COMPATIBLE)
+
+        with pytest.raises(UnsupportedStorageTypeError, match="s3_compatible"):
+            factory.get_nosql_kv()
+
+    def test_mongodb_provider_is_unaffected_and_still_returns_a_mongo_adapter(self, mongo_factory):
+        adapter = mongo_factory.get_nosql_kv()
+        assert "Mongo" in type(adapter).__name__

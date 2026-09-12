@@ -1,7 +1,8 @@
-from ..errors import StorageError
-from ..utils import setup_logger
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional
+
+from ..errors import StorageError
+from ..utils import setup_logger
 
 
 class ObjectStorageAdapter(ABC):

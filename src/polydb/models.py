@@ -4,8 +4,8 @@ Data models and configurations
 """
 
 from dataclasses import dataclass, field
-from typing import Optional, List, Callable, Any, Dict
 from enum import Enum
+from typing import Any, Callable, Dict, List, Optional
 
 
 class CloudProvider(Enum):

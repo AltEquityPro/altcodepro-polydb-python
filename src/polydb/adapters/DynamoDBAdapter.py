@@ -6,9 +6,9 @@ import hashlib
 import json
 import os
 import threading
-from polydb.errors import DatabaseError
 from typing import Any, Dict, List, Optional, Tuple
 
+from polydb.errors import DatabaseError
 
 from ..base.NoSQLKVAdapter import NoSQLKVAdapter
 from ..errors import ConnectionError, NoSQLError
@@ -123,7 +123,6 @@ class DynamoDBAdapter(NoSQLKVAdapter):
         Ensure PK/SK table exists. Safe in prod (no-op if exists).
         Required for LocalStack integration tests.
         """
-        from boto3.dynamodb.conditions import Attr, Key
         from botocore.exceptions import ClientError
 
         if not self._dynamodb:
@@ -322,7 +321,6 @@ class DynamoDBAdapter(NoSQLKVAdapter):
         Supports filters like {"id": "..."} and arbitrary Attr equality.
         """
         from boto3.dynamodb.conditions import Attr, Key
-        from botocore.exceptions import ClientError
 
         try:
             table = self._get_table(model)
@@ -342,9 +340,7 @@ class DynamoDBAdapter(NoSQLKVAdapter):
                 kwargs: Dict[str, Any] = {"KeyConditionExpression": key_cond}
 
                 # Other filters as FilterExpression
-                other = {
-                    k: v for k, v in filters.items() if k not in ("PK", "SK", "partition_key")
-                }
+                other = {k: v for k, v in filters.items() if k not in ("PK", "SK", "partition_key")}
                 if other:
                     expr = None
                     for k, v in other.items():

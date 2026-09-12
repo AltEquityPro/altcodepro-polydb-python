@@ -26,8 +26,8 @@ import threading
 from typing import Any
 
 import pytest
-
 from conftest import uid
+
 from polydb.databaseFactory import DatabaseFactory, EngineConfig, EngineOverride
 from polydb.errors import AdapterConfigurationError
 
@@ -38,12 +38,13 @@ pytestmark = pytest.mark.multi_engine
 # Helpers
 # ────────────────────────────────────────────────────────────────────────────
 
+
 def _need(*fixtures_names: str, request: pytest.FixtureRequest) -> None:
     """Skip test if any of the named fixtures would skip."""
     # fixtures raise pytest.skip internally; we just reference them here
     # to trigger that skip before the body runs.  Actually we use a simpler
     # approach: check the test_config directly.
-    pass   # implemented inline in each test via fixture dependencies
+    pass  # implemented inline in each test via fixture dependencies
 
 
 def item(**extra) -> dict:
@@ -53,6 +54,7 @@ def item(**extra) -> dict:
 # ────────────────────────────────────────────────────────────────────────────
 # Fixtures: DatabaseFactory instances
 # ────────────────────────────────────────────────────────────────────────────
+
 
 @pytest.fixture
 def single_engine_db(pg_factory, test_config):
@@ -99,8 +101,8 @@ def triple_engine_db(pg_factory, mongo_factory, test_config):
     """
     return DatabaseFactory(
         engines=[
-            EngineConfig("primary",  pg_factory,    is_default_sql=True),
-            EngineConfig("archive",  pg_factory,    sql_models={"ArchiveModel"}),
+            EngineConfig("primary", pg_factory, is_default_sql=True),
+            EngineConfig("archive", pg_factory, sql_models={"ArchiveModel"}),
             EngineConfig("docstore", mongo_factory, is_default_nosql=True),
         ],
         enable_audit=False,
@@ -115,7 +117,8 @@ def triple_engine_db(pg_factory, mongo_factory, test_config):
 # a real registry setup.  Each test patches _meta() / _model_type() on the
 # factory instance.
 
-from dataclasses import dataclass, field as dc_field
+from dataclasses import dataclass
+from dataclasses import field as dc_field
 
 
 @dataclass
@@ -153,7 +156,7 @@ def _patch_factory(db, model_cls, meta):
     Monkey-patch a DatabaseFactory instance so _meta() and _model_type()
     return controllable values for a given model class.
     """
-    original_meta       = db._meta
+    original_meta = db._meta
     original_model_type = db._model_type
 
     def _meta(m):
@@ -166,7 +169,7 @@ def _patch_factory(db, model_cls, meta):
             return model_cls
         return original_model_type(m)
 
-    db._meta       = _meta
+    db._meta = _meta
     db._model_type = _model_type
     return db
 
@@ -175,13 +178,14 @@ def _patch_factory(db, model_cls, meta):
 # 1. Single-engine legacy path
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestSingleEngine:
     def test_create_read_delete_roundtrip(self, single_engine_db, pg_schema):
         db = single_engine_db
         _patch_factory(db, SqlModel, FakeMeta())
 
         created = db.create(SqlModel, item())
-        found   = db.read_one(SqlModel, {"id": created["id"]})
+        found = db.read_one(SqlModel, {"id": created["id"]})
         assert found is not None
         assert found["id"] == created["id"]
 
@@ -213,6 +217,7 @@ class TestSingleEngine:
 # 2. Dual-engine routing by model name
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestDualEngineRouting:
     def test_sql_model_routes_to_primary(self, dual_engine_db, pg_schema):
         db = dual_engine_db
@@ -229,7 +234,7 @@ class TestDualEngineRouting:
     def test_unknown_sql_model_routes_to_default(self, dual_engine_db):
         db = dual_engine_db
         adapters = db._resolve_adapters("SomeOtherModel", "sql")
-        assert adapters.engine_name == "primary"   # is_default_sql=True
+        assert adapters.engine_name == "primary"  # is_default_sql=True
 
     def test_unknown_nosql_model_routes_to_default(self, dual_engine_db):
         db = dual_engine_db
@@ -239,7 +244,7 @@ class TestDualEngineRouting:
     def test_sql_write_does_not_affect_nosql(self, dual_engine_db, pg_schema):
         """Create in SQL engine, confirm NoSQL engine has nothing."""
         db = dual_engine_db
-        _patch_factory(db, SqlModel,   FakeMeta(storage="sql",   table="polydb_items"))
+        _patch_factory(db, SqlModel, FakeMeta(storage="sql", table="polydb_items"))
         _patch_factory(db, NoSqlModel, FakeNoSqlMeta(storage="nosql"))
 
         created = db.create(SqlModel, item(name="sql-only"))
@@ -251,6 +256,7 @@ class TestDualEngineRouting:
 # ────────────────────────────────────────────────────────────────────────────
 # 3. Triple-engine routing
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestTripleEngineRouting:
     def test_archive_model_routes_to_archive_engine(self, triple_engine_db):
@@ -272,6 +278,7 @@ class TestTripleEngineRouting:
 # ────────────────────────────────────────────────────────────────────────────
 # 4. EngineOverride — per-call
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestEngineOverride:
     def test_override_targets_named_engine(self, dual_engine_db):
@@ -306,6 +313,7 @@ class TestEngineOverride:
 # 5. Runtime engine registration
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestRuntimeRegistration:
     def test_register_new_engine(self, dual_engine_db, pg_factory):
         db = dual_engine_db
@@ -322,8 +330,8 @@ class TestRuntimeRegistration:
         db = dual_engine_db
 
         replacement = EngineConfig(
-            name="docstore",    # same name — replaces
-            cloud_factory=pg_factory,   # swap to Postgres
+            name="docstore",  # same name — replaces
+            cloud_factory=pg_factory,  # swap to Postgres
             is_default_nosql=True,
         )
         db.register_engine(replacement)
@@ -333,11 +341,13 @@ class TestRuntimeRegistration:
     def test_unregister_engine(self, dual_engine_db, pg_factory):
         db = dual_engine_db
 
-        db.register_engine(EngineConfig(
-            name="temp",
-            cloud_factory=pg_factory,
-            sql_models={"TempModel"},
-        ))
+        db.register_engine(
+            EngineConfig(
+                name="temp",
+                cloud_factory=pg_factory,
+                sql_models={"TempModel"},
+            )
+        )
         db.unregister_engine("temp")
 
         with pytest.raises(AdapterConfigurationError):
@@ -351,6 +361,7 @@ class TestRuntimeRegistration:
 # ────────────────────────────────────────────────────────────────────────────
 # 6. Configuration validation errors
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestConfigValidation:
     def test_two_default_sql_raises(self, pg_factory):
@@ -368,7 +379,7 @@ class TestConfigValidation:
         with pytest.raises(AdapterConfigurationError, match="is_default_nosql"):
             DatabaseFactory(
                 engines=[
-                    EngineConfig("a", pg_factory,    is_default_nosql=True),
+                    EngineConfig("a", pg_factory, is_default_nosql=True),
                     EngineConfig("b", mongo_factory, is_default_nosql=True),
                 ],
                 enable_audit=False,
@@ -392,14 +403,15 @@ class TestConfigValidation:
 # 7. End-to-end: CRUD routed across two real engines
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestEndToEndRouting:
     def test_create_in_pg_read_from_pg(self, dual_engine_db, pg_schema):
         db = dual_engine_db
         _patch_factory(db, SqlModel, FakeMeta(storage="sql", table="polydb_items"))
 
-        data    = item(name="e2e-sql")
+        data = item(name="e2e-sql")
         created = db.create(SqlModel, data)
-        found   = db.read_one(SqlModel, {"id": created["id"]})
+        found = db.read_one(SqlModel, {"id": created["id"]})
         assert found["name"] == "e2e-sql"
         db.delete(SqlModel, created["id"])
 
@@ -407,26 +419,26 @@ class TestEndToEndRouting:
         db = dual_engine_db
         _patch_factory(db, NoSqlModel, FakeNoSqlMeta())
 
-        data    = item(name="e2e-nosql")
+        data = item(name="e2e-nosql")
         created = db.create(NoSqlModel, data)
-        found   = db.read_one(NoSqlModel, {"id": created["id"]})
+        found = db.read_one(NoSqlModel, {"id": created["id"]})
         assert found["name"] == "e2e-nosql"
         db.delete(NoSqlModel, created["id"])
 
     def test_sql_and_nosql_items_do_not_cross(self, dual_engine_db, pg_schema):
         db = dual_engine_db
-        _patch_factory(db, SqlModel,   FakeMeta(storage="sql",   table="polydb_items"))
+        _patch_factory(db, SqlModel, FakeMeta(storage="sql", table="polydb_items"))
         _patch_factory(db, NoSqlModel, FakeNoSqlMeta())
 
-        sql_item   = db.create(SqlModel,   item(name="in-sql"))
+        sql_item = db.create(SqlModel, item(name="in-sql"))
         nosql_item = db.create(NoSqlModel, item(name="in-nosql"))
 
         # SQL item must not appear in NoSQL store
-        assert db.read_one(NoSqlModel, {"id": sql_item["id"]})   is None
+        assert db.read_one(NoSqlModel, {"id": sql_item["id"]}) is None
         # NoSQL item must not appear in SQL store
-        assert db.read_one(SqlModel,   {"id": nosql_item["id"]}) is None
+        assert db.read_one(SqlModel, {"id": nosql_item["id"]}) is None
 
-        db.delete(SqlModel,   sql_item["id"])
+        db.delete(SqlModel, sql_item["id"])
         db.delete(NoSqlModel, nosql_item["id"])
 
 
@@ -434,16 +446,17 @@ class TestEndToEndRouting:
 # 8. Concurrent routing stress
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestConcurrentRouting:
     @pytest.mark.slow
     def test_concurrent_creates_on_two_engines(self, dual_engine_db, pg_schema):
         db = dual_engine_db
-        _patch_factory(db, SqlModel,   FakeMeta(storage="sql",   table="polydb_items"))
+        _patch_factory(db, SqlModel, FakeMeta(storage="sql", table="polydb_items"))
         _patch_factory(db, NoSqlModel, FakeNoSqlMeta())
 
-        errors  = []
+        errors = []
         results = {"sql": [], "nosql": []}
-        lock    = threading.Lock()
+        lock = threading.Lock()
 
         def sql_worker():
             try:
@@ -463,21 +476,20 @@ class TestConcurrentRouting:
                 with lock:
                     errors.append(e)
 
-        threads = (
-            [threading.Thread(target=sql_worker)   for _ in range(5)] +
-            [threading.Thread(target=nosql_worker) for _ in range(5)]
-        )
+        threads = [threading.Thread(target=sql_worker) for _ in range(5)] + [
+            threading.Thread(target=nosql_worker) for _ in range(5)
+        ]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=15)
 
         assert not errors, errors
-        assert len(results["sql"])   == 5
+        assert len(results["sql"]) == 5
         assert len(results["nosql"]) == 5
 
         # Confirm no cross-contamination
-        sql_ids   = {r["id"] for r in results["sql"]}
+        sql_ids = {r["id"] for r in results["sql"]}
         nosql_ids = {r["id"] for r in results["nosql"]}
         assert sql_ids.isdisjoint(nosql_ids)
 

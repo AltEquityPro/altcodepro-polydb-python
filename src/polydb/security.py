@@ -3,17 +3,15 @@
 Security features: encryption, masking, row-level security
 """
 
-from typing import Dict, Any, List, Optional, Callable, Union
-from dataclasses import dataclass
-import hashlib
 import base64
-import os
 import json
-from functools import wraps
 import logging
+import os
+from dataclasses import dataclass
+from typing import Any, Callable, Dict, List, Optional, Union
 
-from .json_safe import json_safe
 from .errors import EncryptionConfigError
+from .json_safe import json_safe
 
 logger = logging.getLogger(__name__)
 
@@ -98,8 +96,8 @@ class FieldEncryption:
         if not active_raw:
             raise EncryptionConfigError(
                 "Field encryption is enabled but POLYDB_ENCRYPTION_KEY is not set. "
-                "Generate one with: python -c \"import os,base64; "
-                "print(base64.b64encode(os.urandom(32)).decode())\" and store it securely "
+                'Generate one with: python -c "import os,base64; '
+                'print(base64.b64encode(os.urandom(32)).decode())" and store it securely '
                 "(e.g. Azure Key Vault / AWS Secrets Manager / GCP Secret Manager) - do not "
                 "commit it or let it be generated on the fly."
             )
@@ -135,7 +133,7 @@ class FieldEncryption:
         if not isinstance(encrypted_data, str) or not encrypted_data.startswith("encrypted:"):
             return encrypted_data
 
-        payload = encrypted_data[len("encrypted:"):]
+        payload = encrypted_data[len("encrypted:") :]
         # Legacy format (pre key-versioning) has no key id segment - decrypt
         # with the active key for backward compatibility with existing data.
         key_id, _, b64_blob = payload.partition(":")

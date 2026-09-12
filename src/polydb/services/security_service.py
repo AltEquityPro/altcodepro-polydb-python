@@ -78,11 +78,10 @@ class SecurityService:
     def encrypt(self, value: str) -> str:
         """Encrypt *value*. Returns Fernet token (URL-safe base64 string)."""
         if not self._key:
-            raise EncryptionConfigError(
-                f"Cannot encrypt: {self.ENV_KEY} is not set."
-            )
+            raise EncryptionConfigError(f"Cannot encrypt: {self.ENV_KEY} is not set.")
         try:
             from cryptography.fernet import Fernet
+
             return Fernet(self._key).encrypt(value.encode("utf-8")).decode("ascii")
         except ImportError:
             raise EncryptionConfigError(
@@ -93,16 +92,13 @@ class SecurityService:
     def decrypt(self, value: str) -> str:
         """Decrypt a Fernet token produced by :meth:`encrypt`."""
         if not self._key:
-            raise EncryptionConfigError(
-                f"Cannot decrypt: {self.ENV_KEY} is not set."
-            )
+            raise EncryptionConfigError(f"Cannot decrypt: {self.ENV_KEY} is not set.")
         try:
             from cryptography.fernet import Fernet
+
             return Fernet(self._key).decrypt(value.encode("ascii")).decode("utf-8")
         except ImportError:
-            raise EncryptionConfigError(
-                "cryptography package is required for field encryption."
-            )
+            raise EncryptionConfigError("cryptography package is required for field encryption.")
         except Exception as exc:
             raise ValueError(f"Decryption failed: {exc}") from exc
 
@@ -122,9 +118,10 @@ class SecurityService:
             if len(decoded) != 32:
                 logger.error(
                     "%s decoded to %d bytes; Fernet requires exactly 32 bytes. "
-                    "Generate a valid key with: python -c \""
-                    "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())\"",
-                    cls.ENV_KEY, len(decoded),
+                    'Generate a valid key with: python -c "'
+                    'from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"',
+                    cls.ENV_KEY,
+                    len(decoded),
                 )
                 return None
             return key_bytes

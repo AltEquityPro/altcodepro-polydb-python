@@ -4,7 +4,7 @@ import os
 import threading
 from typing import Dict, List, Optional
 
-from .base import SharedFilesAdapter
+from .errors import UnsupportedStorageTypeError
 
 # Deliberately NOT importing adapter classes at module level (they used to
 # be, redundantly -- every branch below already does its own lazy, local
@@ -27,7 +27,6 @@ from .models import (
     DynamoDBConfig,
     EFSFileConfig,
     FirestoreConfig,
-    GCPFileConfig,
     GCPPubSubConfig,
     GCPSecretManagerConfig,
     GCPStorageConfig,
@@ -115,11 +114,14 @@ class CloudDatabaseFactory:
         name: str = "azure",
         container_name: Optional[str] = None,
     ) -> (
-        AzureBlobStorageAdapter
-        | S3CompatibleAdapter
-        | GCPStorageAdapter
-        | VercelBlobAdapter
-        | BlockchainBlobAdapter
+        # noqa: F821 -- deliberately never imported at module level (see
+        # this file's own top comment); real only under `from __future__
+        # import annotations`, which this module has.
+        AzureBlobStorageAdapter  # noqa: F821
+        | S3CompatibleAdapter  # noqa: F821
+        | GCPStorageAdapter  # noqa: F821
+        | VercelBlobAdapter  # noqa: F821
+        | BlockchainBlobAdapter  # noqa: F821
     ):
         with self._lock:
             # cache per (name, container) so different containers don't collide
@@ -223,9 +225,16 @@ class CloudDatabaseFactory:
         partition_config: Optional[PartitionConfig] = None,
         name: str = "kv",
     ):
+        # Cache per (name, partition_config) -- two calls with the same `name`
+        # but different partition configs used to silently share the first
+        # adapter built, with the second caller's partition_config thrown
+        # away. Mirrors the object::/secrets:: composite-key pattern used
+        # elsewhere in this file.
+        cache_key = f"kv::{name}::{self._partition_config_key(partition_config)}"
+
         with self._lock:
-            if name in self.instances:
-                return self.instances[name]
+            if cache_key in self.instances:
+                return self.instances[cache_key]
 
             cfg = self.configs.get(name)
             if not cfg:
@@ -240,7 +249,6 @@ class CloudDatabaseFactory:
 
                 if isinstance(cfg, AzureTableConfig):
                     connection_string = cfg.connection_string or ""
-                    table_name = cfg.table_name
                     container_name = cfg.container_name
 
                 instance = AzureTableStorageAdapter(
@@ -335,7 +343,7 @@ class CloudDatabaseFactory:
                 )
 
             # ---------------- MONGODB ----------------
-            else:
+            elif cfg.provider == CloudProvider.MONGODB:
                 from .adapters.MongoDBAdapter import MongoDBAdapter
 
                 mongo_uri = ""
@@ -351,19 +359,50 @@ class CloudDatabaseFactory:
                     db_name=db_name,
                 )
 
-            self.instances[name] = instance
+            # ---------------- NO REAL KV BACKEND FOR THIS PROVIDER ----------
+            # Providers like POSTGRESQL / S3_COMPATIBLE / VAULT / KAFKA /
+            # RABBITMQ have no NoSQL KV adapter of their own. This branch
+            # used to be a bare `else -> MongoDBAdapter("", "")`, which built
+            # a Mongo client pointed at an empty URI and failed obscurely on
+            # first real use instead of here, at construction time, with a
+            # message naming the actual problem.
+            else:
+                raise UnsupportedStorageTypeError(
+                    f"get_nosql_kv: provider {cfg.provider.value!r} has no NoSQL KV adapter. "
+                    "Register an explicit StorageConfig for a supported KV provider "
+                    "(azure, aws, gcp, vercel, mongodb, blockchain) under this `name`, "
+                    "or use get_sql() for a PostgreSQL-only model."
+                )
+
+            self.instances[cache_key] = instance
             return instance
+
+    @staticmethod
+    def _partition_config_key(partition_config: Optional[PartitionConfig]) -> str:
+        """Stable string identity for a PartitionConfig, for use in a cache key."""
+        if partition_config is None:
+            return ""
+        return "|".join(
+            [
+                partition_config.partition_key_template,
+                partition_config.row_key_template or "",
+                ",".join(partition_config.composite_keys or []),
+                str(partition_config.auto_generate),
+            ]
+        )
 
     def get_queue(
         self, name="azure_queue"
     ) -> (
-        AzureQueueAdapter
-        | SQSAdapter
-        | GCPPubSubAdapter
-        | VercelQueueAdapter
-        | BlockchainQueueAdapter
-        | KafkaQueueAdapter
-        | RabbitMQAdapter
+        # noqa: F821 -- same deliberate not-imported-at-module-level
+        # pattern as get_object_storage's own return annotation above.
+        AzureQueueAdapter  # noqa: F821
+        | SQSAdapter  # noqa: F821
+        | GCPPubSubAdapter  # noqa: F821
+        | VercelQueueAdapter  # noqa: F821
+        | BlockchainQueueAdapter  # noqa: F821
+        | KafkaQueueAdapter  # noqa: F821
+        | RabbitMQAdapter  # noqa: F821
     ):
         with self._lock:
             if name in self.instances:
@@ -598,9 +637,7 @@ class CloudDatabaseFactory:
                 url, token, mount_point = None, None, "secret"
                 if isinstance(cfg, VaultConfig):
                     url, token, mount_point = cfg.url, cfg.token, cfg.mount_point
-                instance = VaultAdapter(
-                    url=url or "", token=token or "", mount_point=mount_point
-                )
+                instance = VaultAdapter(url=url or "", token=token or "", mount_point=mount_point)
 
             self.instances[cache_key] = instance
             return instance

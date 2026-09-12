@@ -1,14 +1,14 @@
 # src/polydb/adapters/RabbitMQAdapter.py
-import os
 import json
+import os
 import threading
 import uuid
 from typing import Any, Dict, List, Optional
 
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
-from ..retry import retry
 from ..json_safe import json_safe
+from ..retry import retry
 
 
 class RabbitMQAdapter(QueueAdapter):

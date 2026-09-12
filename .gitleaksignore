@@ -1,0 +1,20 @@
+# Reviewed false positives from a full-history gitleaks scan (see CI's
+# `security` job in .github/workflows/ci.yml, which is a blocking gate as
+# of the pass that added this file). Each entry below was investigated
+# and confirmed to NOT be a real secret before being added -- this file
+# exists to make gitleaks's own generic-api-key entropy heuristic usable
+# as a real gate, not to blanket-suppress findings.
+#
+# 1. Azurite's own well-known, publicly-documented default storage
+#    account key for the local Azure Storage emulator (the literal string
+#    Microsoft ships in every Azurite README/quickstart) -- not a
+#    credential for any real account, and it's the value this repo's own
+#    Readme_Integration_Tests.md's Azurite connection-string example is
+#    supposed to show verbatim.
+ed5a22bf9c475b99aedf55a8a8702ceb722249d2:Readme_Integration_Tests.md:generic-api-key:246
+
+# 2. A false-positive entropy match on the plain source text
+#    "mount_point=self.mount_point" in VaultAdapter.py -- a variable
+#    reference, not a secret value, that happens to trip the
+#    generic-api-key rule's entropy threshold.
+819b7655e23abb1bb73d42ee0a3ecb22e8bf0640:src/polydb/adapters/VaultAdapter.py:generic-api-key:61

@@ -12,6 +12,7 @@ is exercised here since it's the one backend that's free and trivial to
 run locally for CI, matching the project's "verify against a real
 backend, not a mock" convention used by the Postgres/Mongo/etc. tests.
 """
+
 from __future__ import annotations
 
 import os

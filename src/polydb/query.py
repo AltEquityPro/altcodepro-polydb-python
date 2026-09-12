@@ -1,9 +1,11 @@
 # src/polydb/query.py
 
 from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Mapping, Optional, Union
 from enum import Enum
+from typing import Any, Dict, List, Mapping, Optional, Union
+
 from .errors import ValidationError
 from .utils import validate_column_name
 

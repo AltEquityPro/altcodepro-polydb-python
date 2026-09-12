@@ -16,31 +16,47 @@ import types
 import pytest
 
 for _mod in [
-    "google", "google.api_core", "google.api_core.exceptions",
-    "google.cloud", "google.cloud.pubsub_v1", "google.cloud.storage",
-    "google.cloud.firestore", "google.cloud.bigquery",
-    "azure", "azure.storage", "azure.storage.blob", "azure.storage.queue",
-    "azure.storage.file", "azure.data", "azure.data.tables",
-    "boto3", "botocore", "botocore.exceptions",
-    "redis", "pymongo",
-    "varint", "baseconv",
+    "google",
+    "google.api_core",
+    "google.api_core.exceptions",
+    "google.cloud",
+    "google.cloud.pubsub_v1",
+    "google.cloud.storage",
+    "google.cloud.firestore",
+    "google.cloud.bigquery",
+    "azure",
+    "azure.storage",
+    "azure.storage.blob",
+    "azure.storage.queue",
+    "azure.storage.file",
+    "azure.data",
+    "azure.data.tables",
+    "boto3",
+    "botocore",
+    "botocore.exceptions",
+    "redis",
+    "pymongo",
+    "varint",
+    "baseconv",
 ]:
     if _mod not in sys.modules:
         sys.modules[_mod] = types.ModuleType(_mod)
 
-_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType("google.api_core.exceptions")
+_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType(
+    "google.api_core.exceptions"
+)
 if not hasattr(_gcp_exc, "AlreadyExists"):
     _gcp_exc.AlreadyExists = type("AlreadyExists", (Exception,), {})
     _gcp_exc.NotFound = type("NotFound", (Exception,), {})
 sys.modules["google.api_core.exceptions"] = _gcp_exc
 
-from polydb.errors import ValidationError
 from polydb.advanced_query import AdvancedQueryBuilder, AggregateFunction, JoinType, QueryHelper
-
+from polydb.errors import ValidationError
 
 # ---------------------------------------------------------------------------
 # Legitimate usage keeps working
 # ---------------------------------------------------------------------------
+
 
 def test_legitimate_query_builds_expected_sql():
     qb = (
@@ -81,11 +97,15 @@ def test_having_with_and_or_chain():
 # Injection payloads are rejected
 # ---------------------------------------------------------------------------
 
-@pytest.mark.parametrize("table", [
-    "orders; DROP TABLE users; --",
-    "orders' OR '1'='1",
-    "orders/**/UNION/**/SELECT",
-])
+
+@pytest.mark.parametrize(
+    "table",
+    [
+        "orders; DROP TABLE users; --",
+        "orders' OR '1'='1",
+        "orders/**/UNION/**/SELECT",
+    ],
+)
 def test_malicious_table_name_rejected(table):
     with pytest.raises(ValidationError):
         AdvancedQueryBuilder(table=table)
@@ -98,9 +118,7 @@ def test_malicious_join_table_rejected():
 
 def test_malicious_join_on_clause_rejected():
     with pytest.raises(ValidationError):
-        AdvancedQueryBuilder(table="orders").join(
-            "users", "orders.id = 1 OR 1=1; --", "users.id"
-        )
+        AdvancedQueryBuilder(table="orders").join("users", "orders.id = 1 OR 1=1; --", "users.id")
 
 
 def test_malicious_group_by_rejected():
@@ -122,13 +140,16 @@ def test_malicious_aggregate_alias_rejected():
         )
 
 
-@pytest.mark.parametrize("condition", [
-    "1=1; DROP TABLE users; --",
-    "id) OR 1=1--",
-    "1=1 UNION SELECT password FROM users",
-    "COUNT(id) > (SELECT COUNT(*) FROM users)",  # subqueries not allowed
-    "name = 'admin'",  # string literals not allowed
-])
+@pytest.mark.parametrize(
+    "condition",
+    [
+        "1=1; DROP TABLE users; --",
+        "id) OR 1=1--",
+        "1=1 UNION SELECT password FROM users",
+        "COUNT(id) > (SELECT COUNT(*) FROM users)",  # subqueries not allowed
+        "name = 'admin'",  # string literals not allowed
+    ],
+)
 def test_malicious_having_condition_rejected(condition):
     with pytest.raises(ValidationError):
         AdvancedQueryBuilder(table="orders").having(condition)

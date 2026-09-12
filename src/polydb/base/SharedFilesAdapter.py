@@ -1,8 +1,7 @@
-from polydb.utils import setup_logger
-
-
 from abc import ABC, abstractmethod
 from typing import List, Optional
+
+from polydb.utils import setup_logger
 
 
 class SharedFilesAdapter(ABC):

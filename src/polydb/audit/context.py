@@ -1,10 +1,11 @@
 # src/polydb/audit/AuditContext.py
 from contextvars import ContextVar
-from typing import Optional, List
+from typing import List, Optional
+
 
 class AuditContext:
     """Context variables for audit trail"""
-    
+
     actor_id: ContextVar[Optional[str]] = ContextVar("actor_id", default=None)
     roles: ContextVar[List[str]] = ContextVar("roles", default=[])
     tenant_id: ContextVar[Optional[str]] = ContextVar("tenant_id", default=None)
@@ -12,7 +13,7 @@ class AuditContext:
     request_id: ContextVar[Optional[str]] = ContextVar("request_id", default=None)
     ip_address: ContextVar[Optional[str]] = ContextVar("ip_address", default=None)
     user_agent: ContextVar[Optional[str]] = ContextVar("user_agent", default=None)
-    
+
     @classmethod
     def set(
         cls,
@@ -40,7 +41,7 @@ class AuditContext:
             cls.ip_address.set(ip_address)
         if user_agent is not None:
             cls.user_agent.set(user_agent)
-    
+
     @classmethod
     def clear(cls):
         """Clear all context variables"""

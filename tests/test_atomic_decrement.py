@@ -12,7 +12,8 @@ from __future__ import annotations
 
 import sys
 import types
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
+
 import pytest
 
 # ---------------------------------------------------------------------------
@@ -20,40 +21,58 @@ import pytest
 # in environments without the full dependency set.
 # ---------------------------------------------------------------------------
 for _mod in [
-    "google", "google.api_core", "google.api_core.exceptions",
-    "google.cloud", "google.cloud.pubsub_v1", "google.cloud.storage",
-    "google.cloud.firestore", "google.cloud.bigquery",
-    "azure", "azure.storage", "azure.storage.blob", "azure.storage.queue",
-    "azure.storage.file", "azure.data", "azure.data.tables",
-    "boto3", "botocore", "botocore.exceptions",
-    "redis", "pymongo",
-    "varint", "baseconv",
+    "google",
+    "google.api_core",
+    "google.api_core.exceptions",
+    "google.cloud",
+    "google.cloud.pubsub_v1",
+    "google.cloud.storage",
+    "google.cloud.firestore",
+    "google.cloud.bigquery",
+    "azure",
+    "azure.storage",
+    "azure.storage.blob",
+    "azure.storage.queue",
+    "azure.storage.file",
+    "azure.data",
+    "azure.data.tables",
+    "boto3",
+    "botocore",
+    "botocore.exceptions",
+    "redis",
+    "pymongo",
+    "varint",
+    "baseconv",
 ]:
     if _mod not in sys.modules:
         sys.modules[_mod] = types.ModuleType(_mod)
 
 # Stub specific exception classes needed by some adapters
-_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType("google.api_core.exceptions")
+_gcp_exc = sys.modules.get("google.api_core.exceptions") or types.ModuleType(
+    "google.api_core.exceptions"
+)
 if not hasattr(_gcp_exc, "AlreadyExists"):
     _gcp_exc.AlreadyExists = type("AlreadyExists", (Exception,), {})
     _gcp_exc.NotFound = type("NotFound", (Exception,), {})
 sys.modules["google.api_core.exceptions"] = _gcp_exc
 
-from polydb.errors import InsufficientBalanceError, DatabaseError
-
+from polydb.errors import DatabaseError, InsufficientBalanceError
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_adapter():
     """Return a PostgreSQLAdapter with a mocked pool so __init__ doesn't connect."""
     with patch("polydb.adapters.PostgreSQLAdapter.PostgreSQLAdapter._initialize_pool"):
         from polydb.adapters.PostgreSQLAdapter import PostgreSQLAdapter
+
         adapter = PostgreSQLAdapter.__new__(PostgreSQLAdapter)
         adapter._pool = MagicMock()
         adapter._lock = MagicMock()
         import logging
+
         adapter.logger = logging.getLogger("test")
         return adapter
 
@@ -77,6 +96,7 @@ def _make_conn(rows, col_names=None):
 # ---------------------------------------------------------------------------
 # atomic_decrement_if_sufficient — success path
 # ---------------------------------------------------------------------------
+
 
 def test_atomic_decrement_success():
     adapter = _make_adapter()
@@ -103,6 +123,7 @@ def test_atomic_decrement_success():
 # atomic_decrement_if_sufficient — insufficient balance (no rows returned)
 # ---------------------------------------------------------------------------
 
+
 def test_atomic_decrement_insufficient_balance():
     adapter = _make_adapter()
     conn, cursor = _make_conn(None)  # fetchone returns None → no rows updated
@@ -125,6 +146,7 @@ def test_atomic_decrement_insufficient_balance():
 # ---------------------------------------------------------------------------
 # atomic_decrement_if_sufficient — uses provided tx, no own_conn management
 # ---------------------------------------------------------------------------
+
 
 def test_atomic_decrement_with_tx():
     adapter = _make_adapter()
@@ -155,6 +177,7 @@ def test_atomic_decrement_with_tx():
 # atomic_decrement_if_sufficient — SQL error raises DatabaseError
 # ---------------------------------------------------------------------------
 
+
 def test_atomic_decrement_db_error():
     adapter = _make_adapter()
     conn = MagicMock()
@@ -179,6 +202,7 @@ def test_atomic_decrement_db_error():
 # ---------------------------------------------------------------------------
 # Savepoint helpers
 # ---------------------------------------------------------------------------
+
 
 def test_begin_savepoint():
     adapter = _make_adapter()

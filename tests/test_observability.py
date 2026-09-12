@@ -2,26 +2,26 @@
 Tests for polydb.observability — structured logging and slow query detection.
 All tests are unit tests (no live DB required).
 """
+
 from __future__ import annotations
 
 import json
 import logging
 import os
 import time
-from unittest.mock import MagicMock, patch, call
+from unittest.mock import MagicMock, call, patch
 
 import pytest
 
 from polydb.observability.logging import (
-    configure_logging,
-    set_polydb_log_context,
-    _ctx_tenant_id,
+    _ctx_duration_ms,
     _ctx_model,
     _ctx_operation,
-    _ctx_duration_ms,
+    _ctx_tenant_id,
     _PolyDBJsonFormatter,
+    configure_logging,
+    set_polydb_log_context,
 )
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -128,9 +128,7 @@ class TestTimedExecute:
 
     def _make_adapter(self, slow_ms: float = 1000.0):
         """Create a PostgreSQLAdapter without a live DB by mocking pool init."""
-        with patch(
-            "polydb.adapters.PostgreSQLAdapter.PostgreSQLAdapter._initialize_pool"
-        ):
+        with patch("polydb.adapters.PostgreSQLAdapter.PostgreSQLAdapter._initialize_pool"):
             from polydb.adapters.PostgreSQLAdapter import PostgreSQLAdapter
 
             adapter = PostgreSQLAdapter.__new__(PostgreSQLAdapter)
@@ -138,6 +136,7 @@ class TestTimedExecute:
             adapter._lock = __import__("threading").Lock()
             adapter._slow_query_ms = slow_ms
             import polydb.utils as u
+
             adapter.logger = u.setup_logger("polydb.test.adapter")
             return adapter
 

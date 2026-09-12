@@ -63,6 +63,7 @@ def adapter():
 # Construction / config
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestKafkaQueueAdapterConfig:
     def test_bootstrap_servers_parsed_into_a_list(self):
         a = KafkaQueueAdapter(bootstrap_servers="host1:9092, host2:9092")
@@ -114,6 +115,7 @@ class TestKafkaQueueAdapterConfig:
 # ────────────────────────────────────────────────────────────────────────────
 # send()
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestKafkaQueueAdapterSend:
     def test_send_constructs_producer_with_bootstrap_servers(self, adapter):
@@ -173,6 +175,7 @@ class TestKafkaQueueAdapterSend:
 # ────────────────────────────────────────────────────────────────────────────
 # receive()
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestKafkaQueueAdapterReceive:
     def test_receive_constructs_consumer_with_group_id_and_manual_commit(self, adapter):
@@ -256,6 +259,7 @@ class TestKafkaQueueAdapterReceive:
 # ack() / delete()
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestKafkaQueueAdapterAckDelete:
     def _received_message(self, adapter, MockConsumer, offset=4):
         tp = TopicPartition("orders", 0)
@@ -327,6 +331,7 @@ class TestKafkaQueueAdapterAckDelete:
 # basic_nack() call; it must never touch the mocked KafkaConsumer at all.
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestKafkaQueueAdapterNack:
     def _received_message(self, adapter, MockConsumer, offset=4):
         tp = TopicPartition("orders", 0)
@@ -368,6 +373,7 @@ class TestKafkaQueueAdapterNack:
 # close()
 # ────────────────────────────────────────────────────────────────────────────
 
+
 class TestKafkaQueueAdapterClose:
     def test_close_flushes_producer_and_closes_consumers(self, adapter):
         with patch("kafka.KafkaProducer") as MockProducer, patch(
@@ -396,6 +402,7 @@ class TestKafkaQueueAdapterClose:
 # ────────────────────────────────────────────────────────────────────────────
 # Wiring through CloudDatabaseFactory.get_queue()
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestKafkaFactoryWiring:
     def test_get_queue_returns_kafka_adapter_with_configured_bootstrap_servers(self):
@@ -426,9 +433,7 @@ class TestKafkaFactoryWiring:
         with patch("kafka.KafkaProducer") as MockProducer, patch(
             "kafka.KafkaConsumer"
         ) as MockConsumer:
-            MockProducer.return_value.send.return_value.get.return_value = _record_metadata(
-                0, 0
-            )
+            MockProducer.return_value.send.return_value.get.return_value = _record_metadata(0, 0)
             msg_id = queue.send({"via": "factory"}, queue_name="orders")
             assert msg_id == "0-0"
 

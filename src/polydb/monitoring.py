@@ -2,13 +2,13 @@
 """
 Comprehensive monitoring, metrics, and observability
 """
-from typing import Dict, Any, Optional, List, Callable
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
-from collections import defaultdict
+
+import logging
 import threading
 import time
-import logging
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta
+from typing import Any, Callable, Dict, List, Optional
 
 
 @dataclass
@@ -154,25 +154,25 @@ class MetricsCollector:
         agg = self.aggregate()
 
         lines = [
-            f"# HELP polydb_queries_total Total number of queries",
-            f"# TYPE polydb_queries_total counter",
+            "# HELP polydb_queries_total Total number of queries",
+            "# TYPE polydb_queries_total counter",
             f"polydb_queries_total {agg.total_queries}",
             "",
-            f"# HELP polydb_queries_successful Successful queries",
-            f"# TYPE polydb_queries_successful counter",
+            "# HELP polydb_queries_successful Successful queries",
+            "# TYPE polydb_queries_successful counter",
             f"polydb_queries_successful {agg.successful_queries}",
             "",
-            f"# HELP polydb_queries_failed Failed queries",
-            f"# TYPE polydb_queries_failed counter",
+            "# HELP polydb_queries_failed Failed queries",
+            "# TYPE polydb_queries_failed counter",
             f"polydb_queries_failed {agg.failed_queries}",
             "",
-            f"# HELP polydb_query_duration_ms Query duration",
-            f"# TYPE polydb_query_duration_ms summary",
+            "# HELP polydb_query_duration_ms Query duration",
+            "# TYPE polydb_query_duration_ms summary",
             f"polydb_query_duration_ms_sum {agg.total_duration_ms}",
             f"polydb_query_duration_ms_count {agg.total_queries}",
             "",
-            f"# HELP polydb_cache_hit_rate Cache hit rate",
-            f"# TYPE polydb_cache_hit_rate gauge",
+            "# HELP polydb_cache_hit_rate Cache hit rate",
+            "# TYPE polydb_cache_hit_rate gauge",
             f"polydb_cache_hit_rate {agg.cache_hit_rate}",
         ]
 
@@ -283,6 +283,18 @@ class HealthCheck:
             self.factory._cache.set(test_key, {}, test_value, 10)
             retrieved = self.factory._cache.get(test_key, {})
             duration_ms = (time.perf_counter() - start) * 1000
+
+            # A real, found-by-adding-CI-lint gap: `retrieved` was read
+            # back and then never actually checked against what was
+            # written -- set()/get() not raising is not the same thing as
+            # the cache round-tripping the value correctly, so a cache
+            # silently returning stale/empty/wrong data still reported
+            # "healthy" here as long as neither call raised.
+            if retrieved != test_value:
+                return {
+                    "status": "unhealthy",
+                    "error": f"cache round-trip mismatch: wrote {test_value!r}, read back {retrieved!r}",
+                }
 
             return {"status": "healthy", "latency_ms": duration_ms}
         except Exception as e:

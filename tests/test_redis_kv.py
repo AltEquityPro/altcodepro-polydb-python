@@ -13,6 +13,7 @@ model+query dict into a key) -- these back a caller's own explicit key,
 e.g. a manifest workflow step's "redis" integration doing rate limiting
 or a distributed lock.
 """
+
 from __future__ import annotations
 
 import os
@@ -66,6 +67,7 @@ def db():
 # ────────────────────────────────────────────────────────────────────────────
 # RedisCacheEngine's raw methods directly
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestRedisCacheEngineRawKV:
     def test_get_on_a_missing_key_returns_none(self, engine):
@@ -141,6 +143,7 @@ class TestRedisCacheEngineRawKV:
 # DatabaseFactory.redis_* wiring -- the shape a manifest workflow step
 # reaches through ctx.db
 # ────────────────────────────────────────────────────────────────────────────
+
 
 class TestDatabaseFactoryRedisWiring:
     def test_redis_get_set_round_trip(self, db):

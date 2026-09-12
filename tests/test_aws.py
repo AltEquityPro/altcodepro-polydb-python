@@ -16,8 +16,8 @@ from __future__ import annotations
 import time
 
 import pytest
-
 from conftest import uid
+
 from polydb.errors import DatabaseError
 from polydb.query import Operator, QueryBuilder
 

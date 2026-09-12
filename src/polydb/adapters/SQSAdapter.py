@@ -5,11 +5,10 @@ import os
 import threading
 from typing import Any, Dict, List
 
-
 from ..base.QueueAdapter import QueueAdapter
 from ..errors import ConnectionError, QueueError
-from ..retry import retry
 from ..json_safe import json_safe
+from ..retry import retry
 
 
 class SQSAdapter(QueueAdapter):
