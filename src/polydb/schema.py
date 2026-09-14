@@ -61,6 +61,17 @@ class Index:
     name: str
     columns: List[str]
     unique: bool = False
+    # Postgres index access method -- "btree" (the default, and the only
+    # one Postgres actually permits combined with UNIQUE) plus the real
+    # non-default methods a caller may need for a specific column shape:
+    # "gin"/"gist" (full-text search, JSONB containment, array overlap),
+    # "hash" (equality-only, smaller than btree for that one case), "brin"
+    # (large, naturally-ordered, append-mostly columns -- cheap to
+    # maintain relative to btree at real scale). Never validated against
+    # Postgres's own real per-type support here -- that's a live DDL
+    # concern the caller's own database will enforce; this dataclass only
+    # carries the caller's choice through to the generated statement.
+    using: str = "btree"
 
 
 class SchemaBuilder:
@@ -128,10 +139,17 @@ class SchemaBuilder:
 
         for idx in self.indexes:
             unique = "UNIQUE " if idx.unique else ""
+            # "btree" omitted outright rather than spelled out as
+            # "USING btree" -- it's Postgres's own implicit default, and
+            # every index this codebase generated before `using` existed
+            # rendered without a USING clause at all; emitting it only for
+            # a non-default method keeps every pre-existing caller's own
+            # generated SQL text byte-for-byte unchanged.
+            using = f"USING {idx.using} " if idx.using != "btree" else ""
             cols = ", ".join(validate_column_name(c) for c in idx.columns)
             sql = (
                 f"CREATE {unique}INDEX IF NOT EXISTS {validate_table_name(idx.name)} "
-                f"ON {table_name}({cols});"
+                f"ON {table_name}{' ' if using else ''}{using}({cols});"
             )
             statements.append(sql)
 
