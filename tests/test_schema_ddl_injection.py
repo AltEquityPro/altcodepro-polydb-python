@@ -140,3 +140,33 @@ class TestLegitimateSchemasStillBuild:
         assert builder.to_create_indexes("users") == [
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(email, id);"
         ]
+
+
+class TestIndexUsingClause:
+    """Index.using (default "btree") -- added to let a caller pick a
+    non-default Postgres index access method (gin/gist/hash/brin) for a
+    specific column shape, without touching the default btree case's own
+    generated SQL text at all."""
+
+    def test_default_btree_renders_with_no_using_clause_at_all(self):
+        # Every Index constructed before `using` existed implicitly meant
+        # btree -- this proves that default still renders byte-for-byte
+        # identical to the pre-`using` SQL (no "USING btree" ever emitted).
+        builder = _builder().add_index(Index(name="idx_users_email", columns=["email"]))
+        assert builder.to_create_indexes("users") == [
+            "CREATE INDEX IF NOT EXISTS idx_users_email ON users(email);"
+        ]
+
+    def test_non_default_using_is_rendered_between_table_name_and_columns(self):
+        builder = _builder().add_index(Index(name="idx_users_tags", columns=["tags"], using="gin"))
+        assert builder.to_create_indexes("users") == [
+            "CREATE INDEX IF NOT EXISTS idx_users_tags ON users USING gin (tags);"
+        ]
+
+    def test_unique_and_a_non_default_using_compose(self):
+        builder = _builder().add_index(
+            Index(name="idx_users_key", columns=["key"], unique=True, using="hash")
+        )
+        assert builder.to_create_indexes("users") == [
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_key ON users USING hash (key);"
+        ]

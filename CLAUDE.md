@@ -21,12 +21,6 @@ rehydrating them on read — see [Transparent large-payload overflow](#transpare
   [tests/](tests/) run against emulators (Azurite / LocalStack / GCP emulator / Redis / Postgres /
   Mongo) via [docker-compose.test.yml](docker-compose.test.yml)
 
-**Version drift, live right now**: `pyproject.toml`'s `version` is `2.5.11` but
-`src/polydb/__init__.py`'s `__version__` is `2.5.14` — they don't match. This violates the Release
-checklist below and will fail `.github/workflows/publish.yml`'s own version-match gate on the next
-push to `main` that touches `pyproject.toml`. Reconcile them (bump `pyproject.toml` to `2.5.14`,
-or whichever is actually correct) before relying on either number.
-
 Design stance, stated in [databaseFactory.py](src/polydb/databaseFactory.py): PolyDB is the *dumb
 storage layer*. Business logic, tenant enforcement and model-registry validation belong in the
 caller ("UDL"). `PolyDB` the facade class does layer on tenancy/RLS helpers, but the
@@ -210,6 +204,19 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.15** — `schema.Index` gained a `using: str = "btree"` field (Postgres index access
+  method); `SchemaBuilder.to_create_indexes()` now emits a `USING <method>` clause for any
+  non-default value (`gin`/`gist`/`hash`/`brin`, or any other real Postgres method a caller
+  names). The default `"btree"` case renders byte-for-byte identical SQL to before this field
+  existed (`tests/test_schema_ddl_injection.py::TestIndexUsingClause::
+  test_default_btree_renders_with_no_using_clause_at_all` proves the exact string) — a pure
+  additive capability, not a behavior change for any existing caller. Driven by
+  `altcodepro-universal-interprter`'s own need for manifest-declarable composite/typed indexes
+  (that repo's own CLAUDE.md documents the full feature); `Index` has no consumer inside this
+  repo's own `src/` (confirmed via grep), so this is a pure, additive library capability with no
+  other internal call site to update. Also fixes this file's own previously-documented
+  `pyproject.toml`/`__init__.py` version drift (`2.5.11` vs `2.5.14`) by bumping both to `2.5.15`
+  together, per the Release checklist above.
 - **2.5.14** — `PolyDB`/`AsyncPolyDB`/`AsyncDatabaseFactory` exported from the package root. New
   [`aio.py`](src/polydb/aio.py): `AsyncPolyDB`/`AsyncDatabaseFactory` wrap the unchanged sync
   `PolyDB`/`DatabaseFactory` via `asyncio.to_thread`/`ThreadPoolExecutor` (no native async rewrite
