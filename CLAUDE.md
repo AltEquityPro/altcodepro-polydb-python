@@ -120,7 +120,12 @@ threshold is a hardcoded constant, independent of `self.max_size` — see Known 
 
 MongoDB and Vercel KV take the base `NoSQLKVAdapter` row as-is (no override) — both `put()` and
 `patch()` funnel through `_check_overflow`, so this is a real, uniform guarantee on every write
-path, not just `patch()`. Overflow blobs are content-addressed and never rewritten in place, only
+path, not just `patch()`. **`AzureTableStorageAdapter` is the deliberate exception**: it overrides
+both `put()`/`patch()` to skip that base-class `_check_overflow()` call entirely, relying solely on
+its own per-property mechanism inside `_put_raw` (see 2.5.16's changelog entry) — the base class's
+whole-record overflow would otherwise collapse an oversized record down to four bookkeeping fields,
+discarding every other scalar column this adapter's own per-property design exists to keep
+queryable. Overflow blobs are content-addressed and never rewritten in place, only
 ever written fresh and orphaned by later updates — [`overflow_gc.py`](src/polydb/overflow_gc.py)'s
 `sweep_overflow_blobs()` reclaims them (mark-and-sweep, with a grace window).
 
@@ -204,6 +209,53 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.16** — Fixed a real, live-reported data-loss bug: `AzureTableStorageAdapter.put()`/
+  `patch()` (inherited, unoverridden, from the base `NoSQLKVAdapter`) called the base class's own
+  `_check_overflow()` **before** `_put_raw()` ever ran. For any payload over `self.max_size`
+  (`AZURE_TABLE_MAX_SIZE = 60KB`, deliberately set low so this adapter's own per-property overflow
+  inside `_put_raw` gets a chance to run per field — see "Transparent large-payload overflow"
+  above), `_check_overflow()` replaced the **whole record** with a bare `{"_overflow", "_blob_key",
+  "_size", "_checksum"}` reference dict before `_put_raw` ever saw the real data — discarding every
+  other field (`id`, `tenant_id`, `name`, `description`, ...) outright. `_put_raw`'s own
+  reference-entity construction loop then made it worse: its old `if k.startswith("_"): continue`
+  dropped every underscore-prefixed key, not just the internal model marker — so even the four
+  fields `_check_overflow()` *did* keep (`_overflow`/`_blob_key`/`_size`/`_checksum`) never reached
+  the table either. The row that actually landed in Azure Table carried nothing but
+  `PartitionKey`/`RowKey`/the model marker: unfindable by any `id`/`tenant_id`-filtered query
+  (`_query_raw` filters on literal property names, which no longer existed on the entity) and
+  un-rehydratable on top of that (no `_overflow` flag ever persisted for a later `_retrieve_
+  overflow()` to key off).
+  - Reproduced live against a real deployment (`altcodepro-universal-interprter`'s own
+    `integration_template_store.py`, seeding its ~30 bundled OpenAPI specs into Azure Table
+    Storage): every spec over ~60KB — the large majority — silently landed as a near-empty,
+    functionally lost row; only entries small enough to never trigger `_check_overflow` at all (or
+    seeded by an older `polydb` version, before 2.5.11, whose write path never called it) kept
+    working. See that repo's own CLAUDE.md for the full incident writeup and how it was diagnosed
+    (traced end to end from a `ManifestValidationError` naming only 3-4 "known templates" out of
+    30 real rows, through Azure's own live request/response log, to this exact write path).
+  - **Real regression surface opened by 2.5.11's own fix** ("`NoSQLKVAdapter.put()` now calls
+    `_check_overflow()`") — correct for MongoDB/Vercel KV, whose base-class row shape has nothing
+    better to fall back to, but wrong for `AzureTableStorageAdapter` specifically, which already
+    has a superior, per-property overflow mechanism that keeps every OTHER scalar column queryable
+    instead of collapsing the whole record to four internal bookkeeping fields.
+  - Fixed with two changes, both in `AzureTableStorageAdapter.py`: (1) `put()`/`patch()` are now
+    overridden to skip the base class's `_check_overflow()` call entirely, mirroring the base
+    class's own method bodies exactly except for that one omitted call — restoring this adapter's
+    own per-property mechanism as the *only* overflow path it ever takes, exactly as it worked
+    before 2.5.11 introduced the universal `put()`-level call. (2) `_put_raw`'s own reference-entity
+    loop now skips only the internal model-marker key (`_MODEL_FIELD`) instead of every
+    underscore-prefixed key — a real, independent hardening: this also means a model whose field
+    names needed sanitization/renaming (`_pack_entity`'s own `__keymap__` property) no longer has
+    that mapping silently dropped on write either, a second latent instance of the identical
+    class of bug.
+  - 4 new `tests/test_azure_table_put_overflow_data_loss.py` tests, each independently proven to
+    fail without the fix (not just pass with it — confirmed directly by reverting the source
+    change and re-running): a `put()` with a large payload preserves every scalar field and stays
+    findable by an `id`/`tenant_id`-filtered query; `patch()` does too; `put()` provably never
+    touches the base class's own `object_storage` (the fake used for it raises if called at all —
+    and reverting the fix does trigger that raise, landing the exact `overflow/<md5>.json` blob-key
+    format observed in the real incident log); and a direct `_put_raw` call proves `_overflow`/
+    `_blob_key`/`_size`/`_checksum` now survive being persisted.
 - **2.5.15** — `schema.Index` gained a `using: str = "btree"` field (Postgres index access
   method); `SchemaBuilder.to_create_indexes()` now emits a `USING <method>` clause for any
   non-default value (`gin`/`gist`/`hash`/`brin`, or any other real Postgres method a caller
@@ -291,11 +343,16 @@ Ordered roughly by impact. None of these are in-flight; treat as a backlog.
    equivalent env vars directly instead of depending on it.
 7. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
    SECURITY.md, issue/PR templates, or code of conduct, and no published API reference.
-8. **Azure Table's overflow threshold still doesn't consult `self.max_size`.** Azure branches on
-   its own hard-coded `MAX_PROPERTY_CHARS = 30 * 1024` instead; `AZURE_TABLE_MAX_SIZE = 60 * 1024`
-   is set on `self.max_size` and never read. Two different thresholds, neither the one in the base
-   class's own comment (which says "1MB"). This is Azure's per-property granularity being on a
-   separate code path from the base class by design, just not yet unified on one configured value.
+8. **Azure Table's own per-property overflow (`_put_raw`) still branches on its hard-coded
+   `MAX_PROPERTY_CHARS = 30 * 1024` rather than on `self.max_size` (`AZURE_TABLE_MAX_SIZE =
+   60 * 1024`).** Two different thresholds, neither the one in the base class's own comment (which
+   says "1MB") — this remains a real, harmless-but-confusing duality, not yet unified on one
+   configured value. **The severe half of this gap — `self.max_size` being read at all by the BASE
+   class's own `_check_overflow()`, which used to preempt this adapter's per-property mechanism
+   entirely and silently drop most of a record's fields — is fixed as of 2.5.16**: `put()`/`patch()`
+   are now overridden on this adapter to skip `_check_overflow()` outright, so `self.max_size` no
+   longer has any live effect on Azure at all (only `MAX_PROPERTY_CHARS`, inside `_put_raw`, does).
+   See that changelog entry for the full incident this closed.
 9. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, and `architecture/` are still
    dev scratch in the project root (`token.txt` and a checked-in `dist/` are no longer present —
    already cleaned up since this was last a gap).

@@ -486,6 +486,76 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         return restored
 
+    def put(self, model: type, data: JsonDict) -> JsonDict:
+        """Overrides NoSQLKVAdapter.put() to skip the base class's own
+        _check_overflow() call entirely -- a real, reproduced data-loss bug
+        for this adapter specifically, found live: a create whose payload
+        exceeds self.max_size (AZURE_TABLE_MAX_SIZE = 60KB, deliberately
+        low so THIS adapter's own per-property overflow below gets a
+        chance to run per field) was being intercepted by the base class
+        FIRST -- _check_overflow() replaces the WHOLE record with a bare
+        {"_overflow", "_blob_key", "_size", "_checksum"} reference dict
+        before _put_raw ever saw the real data, discarding every other
+        field (id, tenant_id, name, description, ...) outright. The
+        resulting entity landed in Azure Table with nothing but
+        PartitionKey/RowKey/the model marker -- unfindable by any
+        id/tenant_id-filtered query (`_query_raw` filters on literal
+        property names, which no longer existed), and un-rehydratable on
+        top of that (see the _put_raw fix just below: even the discarded
+        dict's own "_overflow"/"_blob_key" keys were then stripped a
+        SECOND time by the old reference_entity loop there). Reproduced
+        against a real deployment seeding this package's own bundled
+        OpenAPI integration-template specs into Azure Table Storage:
+        every spec over ~60KB (the large majority of them) silently
+        landed as a near-empty row while the four smallest/oldest ones
+        (well under the threshold, or seeded before this class's own
+        per-property path existed) kept working -- see
+        altcodepro-universal-interprter's own CLAUDE.md for the full,
+        live-reported symptom this closes.
+
+        This was a real regression surface opened by 2.5.11's own fix
+        (`NoSQLKVAdapter.put()` now calls `_check_overflow()`) -- correct
+        for Mongo/Vercel KV, whose own base-class row shape has nothing
+        better to fall back to, but wrong for Azure, which already has a
+        superior, per-property overflow mechanism inside `_put_raw` that
+        keeps every OTHER scalar column queryable instead of collapsing
+        the whole record to four internal bookkeeping fields. Bypassing
+        the base `_check_overflow()` here restores exactly the guarantee
+        this adapter's own per-property path was built to provide --
+        `patch()` gets the identical override immediately below for the
+        same reason (the base class's own `patch()` calls
+        `_check_overflow()` too)."""
+        pk, rk = self._get_pk_rk(model, data)
+        return self._put_raw(model, pk, rk, data)
+
+    def patch(
+        self,
+        model: type,
+        entity_id,
+        data: JsonDict,
+        *,
+        etag: Optional[str] = None,
+        replace: bool = False,
+    ) -> JsonDict:
+        """See put()'s own docstring immediately above for the real bug
+        this closes -- identical reasoning, mirroring the base class's
+        own patch() body exactly except for the omitted _check_overflow()
+        call before _put_raw."""
+        if isinstance(entity_id, dict):
+            pk = entity_id.get("partition_key") or entity_id.get("pk")
+            rk = entity_id.get("row_key") or entity_id.get("rk") or entity_id.get("id")
+        else:
+            pk, rk = self._get_pk_rk(model, {"id": entity_id, **data})
+
+        if not replace:
+            existing = self._get_raw(model, pk, rk)
+            if existing:
+                existing = self._retrieve_overflow(existing)
+                existing.update(data)
+                data = existing
+
+        return self._put_raw(model, pk, rk, data)
+
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
         try:
@@ -553,7 +623,21 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 _MODEL_FIELD: model.__qualname__,
             }
             for k, v in entity.items():
-                if k.startswith("_"):
+                # Only _MODEL_FIELD is genuinely redundant here (already
+                # set above). A real, reproduced bug this used to be
+                # `if k.startswith("_"): continue` -- which also silently
+                # dropped every OTHER underscore-prefixed key this loop
+                # ever sees: `_overflow`/`_blob_key`/`_size`/`_checksum`
+                # (when `entity` is a whole-record overflow reference
+                # handed in from a caller, e.g. before put()/patch()
+                # above were fixed to stop routing one through _put_raw
+                # at all) and `__keymap__` (_pack_entity's own sanitized-
+                # property-name map, needed by _unpack_entity to restore
+                # original field names -- silently unrecoverable on read
+                # for any model whose field names needed sanitizing).
+                # Neither omission raised; both just meant the persisted
+                # row quietly carried less data than what was written.
+                if k == _MODEL_FIELD:
                     continue
                 if k in large_val_dict:
                     metadata = large_val_dict[k]
