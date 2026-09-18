@@ -365,16 +365,32 @@ class PostgreSQLAdapter:
         return [self._serialize_param(p) for p in params]
 
     def _deserialize_row(self, row: JsonDict) -> JsonDict:
-        for k, v in list(row.items()):
-            if isinstance(v, str):
-                s = v.strip()
-                if (s.startswith("{") and s.endswith("}")) or (
-                    s.startswith("[") and s.endswith("]")
-                ):
-                    try:
-                        row[k] = json.loads(s)
-                    except Exception:
-                        pass
+        """Historically this guess-parsed every string column whose value
+        merely LOOKED like JSON (started/ended with `{}`/`[]`) via a bare
+        `json.loads`, regardless of the column's own declared type --
+        real, reproduced bug: a plain TEXT/VARCHAR column storing a
+        legitimate string that happens to be JSON-shaped (e.g. a prompt
+        template's own `content` column holding a JSON-encoded email
+        template) got silently corrupted from `str` into `dict`/`list` on
+        every read, breaking every caller downstream that expected the
+        column's own real, declared type back (universal-interprter's
+        `prompt.render` -> `text.template` crashed with `'dict' object
+        has no attribute 'replace'` this way).
+
+        A real JSON/JSONB column never needed this heuristic in the first
+        place: psycopg2 registers global JSON/JSONB typecasters for OIDs
+        114/3802 automatically at import time (`psycopg2.extensions.
+        string_types`, confirmed directly against the pinned driver, not
+        assumed) -- every genuine `json`/`jsonb` column already comes back
+        as a native Python dict/list, with `isinstance(v, str)` already
+        False by the time this function ever sees it. This heuristic was
+        therefore pure downside: redundant for the case it was meant to
+        help, and silently destructive for every TEXT/VARCHAR column
+        whose real string content merely resembles JSON. This adapter
+        stays the "dumb storage layer" it documents itself as -- it
+        returns exactly what the driver already gives it, never guesses
+        at a column's type from its own contents.
+        """
         return row
 
     # ---------------------------------------------------------------------

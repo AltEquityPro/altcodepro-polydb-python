@@ -204,6 +204,34 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.16** — Fixed a real, reported production bug: `PostgreSQLAdapter._deserialize_row` used to
+  run every returned row through a heuristic that `json.loads()`'d ANY string column value merely
+  because it started/ended with `{}`/`[]`, regardless of the column's own declared type (its own
+  prior docstring: *"Postgres JSON/JSONB often comes back as dict/list already depending on driver
+  config. If it comes as a string, try json.loads safely"*). A real `json`/`jsonb` column never
+  needed this: psycopg2 registers global typecasters for OIDs 114/3802 automatically at import
+  time (confirmed directly against the pinned driver via `psycopg2.extensions.string_types`, not
+  assumed), so a genuine JSON/JSONB column already comes back as a native dict/list by the time
+  `_deserialize_row` ever sees it — `isinstance(v, str)` was already `False` for those. The
+  heuristic was therefore pure downside: redundant for the one case it was meant to help, and
+  silently destructive for every ordinary TEXT/VARCHAR column whose real string content merely
+  happened to look JSON-shaped. Concretely reproduced via `altcodepro-universal-interprter`'s own
+  `prompt_template_store.py`, which stores a prompt's `content` as a plain TEXT column — an email
+  template whose own content is itself a JSON-encoded string (`{"subject": ..., "html": ...,
+  "text": ...}`) got silently coerced from `str` to `dict` on every read, crashing the next real
+  step downstream (`actions/core_prompt.py`'s `prompt.render` → `core_text.py`'s `text_template`,
+  which calls `template.replace(...)`) with `'dict' object has no attribute 'replace'` — a bug
+  with no size limit on its blast radius, since it silently corrupts ANY TEXT/VARCHAR column
+  across ANY caller of this adapter whose real content merely resembles JSON, not just this one
+  prompt template. Fixed by removing the heuristic outright — `_deserialize_row` now returns the
+  row exactly as the driver already gave it, matching this repo's own "dumb storage layer" design
+  stance (see "What this project is" above): it never guesses at a column's type from its own
+  contents. New `tests/test_postgresql_deserialize_row.py` (6 tests, no live Postgres needed —
+  `_deserialize_row` is a pure dict-in/dict-out method) proves a JSON-shaped TEXT string now
+  round-trips unchanged, a JSON-array-shaped string too, an ordinary scalar string is untouched, a
+  real dict value (what a genuine json/jsonb column already looks like by the time this method
+  runs) passes through unchanged, `None`/non-string values are untouched, and the psycopg2
+  typecaster-registration claim itself is directly verified against the pinned driver.
 - **2.5.15** — `schema.Index` gained a `using: str = "btree"` field (Postgres index access
   method); `SchemaBuilder.to_create_indexes()` now emits a `USING <method>` clause for any
   non-default value (`gin`/`gist`/`hash`/`brin`, or any other real Postgres method a caller
