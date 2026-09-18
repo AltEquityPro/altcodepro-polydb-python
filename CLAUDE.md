@@ -204,58 +204,6 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
-- **2.5.16** — Fixed a real, live-reported data-loss bug: `NoSQLKVAdapter._check_overflow()`
-  (base class, shared by every NoSQL adapter unless it overrides `put()`/`patch()`) replaced an
-  oversized record's WHOLE body with a bare `{"_overflow", "_blob_key", "_size", "_checksum"}`
-  reference dict before handing it to `_put_raw` — discarding every other field (`id`,
-  `tenant_id`, `name`, `description`, ...) from the row actually persisted, contradicting this
-  file's own long-documented claim ("Scalar fields are copied onto the reference row") that the
-  code never implemented. A row whose `id`/`tenant_id` never survived onto the persisted reference
-  was unfindable by the ordinary `id`/`tenant_id`-filtered query every ordinary `read_one()`/
-  `list()` call issues — even though the FULL record was sitting safely in object storage the
-  whole time, correctly retrievable by `_retrieve_overflow()` the moment a row is actually found.
-  - Reproduced live against a real deployment seeding this package's own bundled OpenAPI
-    integration-template specs (`altcodepro-universal-interprter`'s own `seed_data/
-    integration_templates/*.json`) into Azure Table Storage: the exact four specs whose COMPACT
-    (`json.dumps`) size stayed under Azure's own 60KB whole-record threshold (`clicksend`,
-    `google-maps`, `google-search-console`, `notion`) kept showing up in the catalog; every other
-    spec — all over that threshold — silently vanished from `list()`/`known_ids()`, producing
-    `ManifestValidationError: config.template 'X' is not a registered integration template`. A
-    byte-for-byte match between "which specs are over 60KB" and "which specs went missing",
-    confirmed directly against the real bundled files, not assumed — see that repo's own CLAUDE.md
-    for the full incident writeup.
-  - **An earlier version of this fix instead made `AzureTableStorageAdapter.put()`/`patch()` skip
-    the base class's `_check_overflow()` call entirely — this was wrong and was reverted.**
-    Skipping `_check_overflow()` would have silently removed this adapter's own last-resort
-    guarantee that a record of ANY size can always be written via whole-record blob overflow,
-    never rejected — the actual, load-bearing guarantee `_check_overflow()`/`_retrieve_overflow()`
-    exist to provide for every adapter, Azure included. The real fix keeps `_check_overflow()`
-    fully in the write path for every adapter, unconditionally.
-  - Fixed with two changes: (1) `NoSQLKVAdapter._check_overflow()`'s own reference dict now also
-    carries a best-effort copy of every small scalar field from the original record (`str`/`int`/
-    `float`/`bool`/`None` whose own JSON encoding stays under 2048 bytes, up to 50 fields,
-    `_SCALAR_COPY_MAX_FIELDS`/`_SCALAR_COPY_MAX_BYTES`) — never letting a caller's own field
-    shadow the bookkeeping keys `_retrieve_overflow` depends on. (2)
-    `AzureTableStorageAdapter._put_raw`'s own reference-entity construction loop now skips only
-    the internal model-marker key (`_MODEL_FIELD`) instead of every underscore-prefixed key — its
-    old `if k.startswith("_"): continue` also silently dropped `_overflow`/`_blob_key`/`_size`/
-    `_checksum` themselves whenever `_put_raw` was handed a whole-record overflow reference,
-    meaning even with fix (1) alone a later read would find the row but never rehydrate its real
-    content (no `_overflow` flag ever persisted for `_retrieve_overflow` to key off) — both
-    changes are needed together. A real, independent bonus: this also means a model whose field
-    names needed sanitization/renaming (`_pack_entity`'s own `__keymap__` property) no longer has
-    that mapping silently dropped on write either.
-  - 9 new tests, each independently verified against the real bundled spec sizes and against a
-    revert of the fix: `tests/test_azure_table_put_overflow_data_loss.py` (an overflow write still
-    reaches `object_storage.put()` with the full, untouched record; scalar fields survive on the
-    persisted Azure Table row; the row is findable by an id/tenant_id-filtered `_query_raw`; a
-    real `query()` round trip rehydrates the full record including the overflowed field; `patch()`
-    gets the identical proof; `_put_raw` no longer strips `_overflow`/`_blob_key`/`_size`/
-    `_checksum` when handed a pre-collapsed reference directly) and
-    `tests/test_nosql_kv_overflow_write_path.py::TestCheckOverflowPreservesScalarFields` (5 more,
-    directly on the base class: scalar fields copied, a large non-scalar field excluded, a
-    caller field never shadows the bookkeeping keys, the 50-field cap, and the real-world
-    "still findable after overflow" proof).
 - **2.5.15** — `schema.Index` gained a `using: str = "btree"` field (Postgres index access
   method); `SchemaBuilder.to_create_indexes()` now emits a `USING <method>` clause for any
   non-default value (`gin`/`gist`/`hash`/`brin`, or any other real Postgres method a caller
@@ -343,23 +291,11 @@ Ordered roughly by impact. None of these are in-flight; treat as a backlog.
    equivalent env vars directly instead of depending on it.
 7. **Open-source hygiene.** MIT LICENSE is present, but there is no CONTRIBUTING.md, CHANGELOG.md,
    SECURITY.md, issue/PR templates, or code of conduct, and no published API reference.
-8. **Azure Table has two different, uncoordinated overflow thresholds, and the lower one
-   (`self.max_size`) always wins first.** `self.max_size` (`AZURE_TABLE_MAX_SIZE = 60 * 1024`) IS
-   read — by the base class's own `_check_overflow()`, called from `put()`/`patch()` *before*
-   `_put_raw()` ever runs (confirmed directly while chasing 2.5.16's own data-loss bug above) — so
-   any record whose total JSON exceeds 60KB is intercepted by the WHOLE-RECORD overflow path
-   first, and `_put_raw`'s own, more refined PER-PROPERTY threshold (`MAX_PROPERTY_CHARS = 30 *
-   1024`, a separate hardcoded local constant, never `self.max_size`) never gets a chance to run
-   on that record at all. Neither threshold is the one the base class's own comment describes
-   ("1MB"). Practical effect: this adapter's own documented advantage — "only oversized columns
-   move out, every other column stays queryable" — is currently unreachable for any record whose
-   TOTAL size already exceeds 60KB, even if no single property within it is individually large;
-   2.5.16's own scalar-field-copy fix (see "Recent changes") keeps such a record findable and
-   fully retrievable regardless, but the per-property granularity itself stays effectively
-   bypassed until the two thresholds are unified (e.g. raising `self.max_size` to Azure's real
-   ~1MB entity ceiling, letting `_put_raw`'s own per-property mechanism handle the common case,
-   with `_check_overflow` remaining as the last-resort whole-record fallback only once
-   per-property overflow still isn't enough).
+8. **Azure Table's overflow threshold still doesn't consult `self.max_size`.** Azure branches on
+   its own hard-coded `MAX_PROPERTY_CHARS = 30 * 1024` instead; `AZURE_TABLE_MAX_SIZE = 60 * 1024`
+   is set on `self.max_size` and never read. Two different thresholds, neither the one in the base
+   class's own comment (which says "1MB"). This is Azure's per-property granularity being on a
+   separate code path from the base class by design, just not yet unified on one configured value.
 9. **Repo hygiene:** `combine_code.py`, `extract_architecture.py`, and `architecture/` are still
    dev scratch in the project root (`token.txt` and a checked-in `dist/` are no longer present —
    already cleaned up since this was last a gap).

@@ -553,25 +553,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 _MODEL_FIELD: model.__qualname__,
             }
             for k, v in entity.items():
-                # Only _MODEL_FIELD is genuinely redundant here (already
-                # set above). A real, reproduced bug this used to be
-                # `if k.startswith("_"): continue` -- which also silently
-                # dropped every OTHER underscore-prefixed key this loop
-                # ever sees: `_overflow`/`_blob_key`/`_size`/`_checksum`
-                # (present whenever `entity` is a whole-record overflow
-                # reference the base class's own `_check_overflow()`
-                # handed to `put()`/`patch()` before this call) and
-                # `__keymap__` (_pack_entity's own sanitized-property-name
-                # map, needed by _unpack_entity to restore original field
-                # names). Dropping `_overflow`/`_blob_key` specifically
-                # meant a whole-record-overflowed row landed in Azure
-                # Table with no flag at all for a later
-                # `_retrieve_overflow()` to key off -- the row looked like
-                # an ordinary (incomplete) record forever, never
-                # rehydrated. Neither omission raised; both just meant the
-                # persisted row quietly carried less data than what was
-                # written.
-                if k == _MODEL_FIELD:
+                if k.startswith("_"):
                     continue
                 if k in large_val_dict:
                     metadata = large_val_dict[k]
