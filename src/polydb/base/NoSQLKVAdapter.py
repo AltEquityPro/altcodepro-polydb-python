@@ -20,6 +20,11 @@ if TYPE_CHECKING:
 class NoSQLKVAdapter:
     """Base with auto-overflow and LINQ support"""
 
+    # _check_overflow()'s own best-effort scalar-field-copy cap -- see that
+    # method's docstring.
+    _SCALAR_COPY_MAX_FIELDS = 50
+    _SCALAR_COPY_MAX_BYTES = 2048
+
     def __init__(
         self,
         partition_config: Optional[PartitionConfig] = None,
@@ -83,7 +88,41 @@ class NoSQLKVAdapter:
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _check_overflow(self, data: JsonDict) -> Tuple[JsonDict, Optional[str]]:
-        """Check size and store in blob if needed"""
+        """Check size and store in blob if needed.
+
+        When `data`'s own JSON size exceeds `self.max_size`, the FULL
+        record is written to object storage -- never skipped, this is the
+        one mechanism every adapter shares for guaranteeing that a caller
+        can write a record of any size without it ever being rejected by
+        a backend's own real per-record ceiling -- and a small reference
+        row is returned in its place, to be persisted instead.
+        `_retrieve_overflow` is that reference's read-side mirror: any
+        adapter whose own `query()`/`query_linq()` calls it (the base
+        class's own do, on every row) transparently fetches the full
+        record back from object storage and verifies its checksum before
+        handing it to the caller.
+
+        The reference row also carries a best-effort copy of every SMALL
+        SCALAR field from the original `data` (str/int/float/bool/None
+        whose own JSON encoding stays under `_SCALAR_COPY_MAX_BYTES`, up
+        to `_SCALAR_COPY_MAX_FIELDS` of them) -- this is what keeps an
+        overflowed row still findable by an ordinary id/tenant_id-filtered
+        query, and still distinguishable from every other overflowed row
+        of the same model in a listing, even before its bulk payload is
+        ever rehydrated from blob storage. Before this, the reference row
+        carried only the four internal bookkeeping keys
+        (`_overflow`/`_blob_key`/`_size`/`_checksum`) and nothing else --
+        a real, reproduced bug: a record whose id/tenant_id never survived
+        onto the persisted row was unfindable by the exact
+        id/tenant_id-filtered read every normal `read_one()`/`list()` call
+        issues, even though the full record was sitting safely in object
+        storage the whole time. See altcodepro-universal-interprter's own
+        CLAUDE.md for the live-reported symptom this closes (seeding this
+        package's own bundled OpenAPI integration-template specs into
+        Azure Table Storage -- every spec whose row exceeded Azure's own
+        60KB threshold became unfindable by its own id/tenant_id-filtered
+        catalog lookup, byte-for-byte matching which specs were and
+        weren't over that threshold)."""
         data_bytes = json.dumps(data, default=json_safe).encode()
         data_size = len(data_bytes)
 
@@ -103,12 +142,33 @@ class NoSQLKVAdapter:
             except Exception as e:
                 raise StorageError(f"Overflow storage failed: {str(e)}")
 
-            return {
+            reference: JsonDict = {
                 "_overflow": True,
                 "_blob_key": blob_key,
                 "_size": data_size,
                 "_checksum": blob_id,
-            }, blob_key
+            }
+
+            copied = 0
+            for key, value in data.items():
+                if copied >= self._SCALAR_COPY_MAX_FIELDS:
+                    break
+                if key in reference:
+                    # Never let a caller's own field shadow the bookkeeping
+                    # keys _retrieve_overflow depends on.
+                    continue
+                if value is not None and not isinstance(value, (str, int, float, bool)):
+                    continue
+                try:
+                    encoded = json.dumps(value, default=json_safe)
+                except Exception:
+                    continue
+                if len(encoded) > self._SCALAR_COPY_MAX_BYTES:
+                    continue
+                reference[key] = value
+                copied += 1
+
+            return reference, blob_key
 
         return data, None
 

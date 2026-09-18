@@ -160,3 +160,92 @@ class TestPutOverflowsLikePatch:
 
         assert put_result["_overflow"] is True
         assert patch_result["_overflow"] is True
+
+
+class TestCheckOverflowPreservesScalarFields:
+    """A real, reproduced bug: _check_overflow()'s own reference dict used
+    to carry ONLY the four internal bookkeeping keys
+    (_overflow/_blob_key/_size/_checksum), discarding every other field
+    from the row a caller actually persists -- contradicting this
+    module's own long-documented claim ("scalar fields are copied onto
+    the reference row") that the code never implemented. A row whose
+    id/tenant_id never survived onto the persisted reference was
+    unfindable by an ordinary id/tenant_id-filtered query even though the
+    FULL record was sitting safely in object storage the whole time --
+    see AzureTableStorageAdapter's own data-loss bug (test_azure_table_
+    put_overflow_data_loss.py) for the live-reported incident this fix
+    closes for every adapter, not just Azure."""
+
+    def test_small_scalar_fields_are_copied_onto_the_reference_row(self):
+        adapter = InMemoryKVAdapter(max_size=200)
+        data = {
+            "tenant_id": "t1",
+            "id": "w1",
+            "name": "Widget One",
+            "count": 3,
+            "active": True,
+            "note": None,
+            "blob": "x" * 5000,
+        }
+
+        reference, blob_key = adapter._check_overflow(data)
+
+        assert reference["_overflow"] is True
+        assert reference["tenant_id"] == "t1"
+        assert reference["id"] == "w1"
+        assert reference["name"] == "Widget One"
+        assert reference["count"] == 3
+        assert reference["active"] is True
+        assert reference["note"] is None
+        # The oversized field itself must NOT be copied onto the reference
+        # row -- that's the whole point of moving it to blob storage.
+        assert "blob" not in reference
+
+    def test_a_large_non_scalar_field_is_excluded_from_the_reference_row(self):
+        adapter = InMemoryKVAdapter(max_size=200)
+        data = {"tenant_id": "t1", "id": "w1", "spec": {"paths": {"x": "y" * 5000}}}
+
+        reference, _ = adapter._check_overflow(data)
+
+        assert "spec" not in reference
+        assert reference["tenant_id"] == "t1"
+        assert reference["id"] == "w1"
+
+    def test_a_caller_field_never_shadows_the_bookkeeping_keys(self):
+        adapter = InMemoryKVAdapter(max_size=200)
+        data = {
+            "tenant_id": "t1",
+            "id": "w1",
+            "blob": "x" * 5000,
+            # A caller-supplied field that happens to collide with one of
+            # _check_overflow's own bookkeeping keys must never win.
+            "_overflow": "not-a-bookkeeping-value",
+        }
+
+        reference, blob_key = adapter._check_overflow(data)
+
+        assert reference["_overflow"] is True
+        assert reference["_blob_key"] == blob_key
+
+    def test_scalar_copy_is_capped_at_fifty_fields(self):
+        adapter = InMemoryKVAdapter(max_size=200)
+        data = {"tenant_id": "t1", "id": "w1", "blob": "x" * 5000}
+        for i in range(80):
+            data[f"field_{i}"] = i
+
+        reference, _ = adapter._check_overflow(data)
+
+        copied_field_count = sum(1 for k in reference if k.startswith("field_"))
+        assert copied_field_count <= adapter._SCALAR_COPY_MAX_FIELDS
+
+    def test_a_row_that_overflowed_is_still_findable_by_an_id_tenant_id_filtered_query(self):
+        """The real-world manifestation of the bug this fix closes: the
+        exact id/tenant_id-filtered read IntegrationTemplateStore.get()/
+        DatabaseFactory.read_one() issue must find an overflowed row."""
+        adapter = InMemoryKVAdapter(max_size=200)
+        adapter.put(Widget, _big_payload(rk="w1"))
+
+        stored = adapter._get_raw(Widget, "t1", "w1")
+
+        assert stored["id"] == "w1"
+        assert stored["tenant_id"] == "t1"
