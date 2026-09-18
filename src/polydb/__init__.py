@@ -4,7 +4,7 @@ PolyDB - Enterprise Cloud-Independent Database Abstraction
 Full LINQ support, field-level audit, cache, soft delete, overflow storage
 """
 
-__version__ = "2.5.15"
+__version__ = "2.5.17"
 
 from .aio import AsyncDatabaseFactory, AsyncPolyDB
 from .audit.context import AuditContext

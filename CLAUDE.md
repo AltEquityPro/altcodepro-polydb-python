@@ -204,6 +204,44 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.17** — **Reverted 2.5.16.** That release removed `PostgreSQLAdapter._deserialize_row`'s
+  JSON-shaped-string decode heuristic outright, reasoning it was "pure downside" — wrong, and a
+  real regression: `altcodepro-universal-interprter`'s own `observability.py` (`Observability.
+  query()`) writes a `logs.emit` payload as `json.dumps(...)` into a plain TEXT column (`payload`,
+  deliberately never JSONB) and reads it back through a raw `sql_adapter.execute()` call with no
+  explicit parsing of its own — that module's own docstring explicitly promises *"through logs.
+  query's own `payload` field gets a real dict back"*, a real, already-shipped contract this
+  heuristic was the only thing that ever fulfilled. Removing it silently broke `logs.query` for
+  every caller (confirmed by reading `execute(fetch=True)`'s own call to `_deserialize_row`, not
+  assumed) — caught only after 2.5.16 shipped, when the consuming engine's own maintainer pointed
+  out the regression directly.
+  - The real fix for 2.5.16's own original bug report (a JSON-shaped `content` TEXT column in
+    `prompt_template_store.py` getting silently coerced from `str` to `dict`, crashing `prompt.
+    render` → `text.template`'s `template.replace(...)`) was never "delete the heuristic" — it was
+    always a genuinely unavoidable ambiguity at THIS layer: a plain TEXT column can never be told
+    apart from a JSONB one purely by string-sniffing its own value's shape (`{"subject": ...}` and
+    a real serialized app payload look identical to this method), so there is no generic fix here
+    that serves both real callers (`observability.py`'s `payload`, which WANTS the decode) and
+    `prompt_template_store.py`'s `content` (which must NOT get it) at once. The correct fix belongs
+    at the layer that owns the column's real contract — `prompt_template_store.py`'s new
+    `_coerce_content_to_str` (that repo's own CLAUDE.md documents the full fix) re-`json.dumps()`s
+    a `content` value that comes back non-`str`, restoring the real string every caller of that one
+    store is promised, without touching this adapter's own shared, cross-cutting behavior at all.
+  - `_deserialize_row`'s own body is now byte-for-byte the pre-2.5.16 heuristic again; only its
+    docstring changed, to document BOTH real, opposing pressures on this one method (a caller that
+    wants the decode, a caller that must be protected from it) rather than silently picking a side.
+  - `tests/test_postgresql_deserialize_row.py` was rewritten to match: JSON-object- and
+    JSON-array-shaped strings now assert they DO decode (the real, load-bearing case), plus the
+    original not-touched/dict-passthrough proofs, and one dedicated test
+    (`test_the_honest_trade_off_...`) that states the real cost plainly — a `content`-shaped
+    JSON string still gets coerced at THIS layer, which is exactly why the real fix had to move to
+    `prompt_template_store.py` instead.
+  - **Lesson, stated plainly rather than glossed over**: 2.5.16 was shipped on the strength of one
+    real reproduction (the `prompt_template_store.py` crash) without first checking every OTHER
+    real caller of the method being changed — `observability.py`'s own dependency was sitting in
+    the same codebase, one grep away, and was found only after the fact. A shared, cross-cutting
+    adapter method needs its full caller surface checked before a "just remove it" fix, not only
+    the one call site that happened to be reported broken.
 - **2.5.15** — `schema.Index` gained a `using: str = "btree"` field (Postgres index access
   method); `SchemaBuilder.to_create_indexes()` now emits a `USING <method>` clause for any
   non-default value (`gin`/`gist`/`hash`/`brin`, or any other real Postgres method a caller

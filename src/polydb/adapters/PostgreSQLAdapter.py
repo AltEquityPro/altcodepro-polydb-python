@@ -365,6 +365,50 @@ class PostgreSQLAdapter:
         return [self._serialize_param(p) for p in params]
 
     def _deserialize_row(self, row: JsonDict) -> JsonDict:
+        """Best-effort convenience decode: any string column value that
+        LOOKS like JSON (starts/ends with `{}`/`[]`) is `json.loads`'d,
+        regardless of the column's own declared type. This is a real,
+        deliberate, LOAD-BEARING convenience a real caller depends on --
+        e.g. universal-interprter's `observability.py`'s `Observability.
+        query()` writes a `logs.emit` payload as `json.dumps(...)` into a
+        plain TEXT column (`payload`, never JSONB -- see that module's
+        own comment) and its own docstring explicitly promises "logs.
+        query's own `payload` field gets a real dict back"; removing this
+        heuristic (briefly tried, then reverted -- see this repo's own
+        2.5.16/2.5.17 CLAUDE.md history) silently broke that real,
+        already-shipped contract. `query_log.py`'s own `fields` column is
+        the identical shape, just defended a second way: it independently
+        `json.loads`'s its own value with an `isinstance(..., str)` guard
+        rather than relying on this method at all -- proof this repo has
+        real callers on both sides (some lean on this adapter-level
+        decode, some defend for themselves).
+
+        **The real, honest trade-off, unavoidable at this layer**: a
+        genuinely non-JSON TEXT/VARCHAR string whose own real content
+        merely LOOKS JSON-shaped (e.g. a prompt template's own `content`
+        column holding a literal JSON-encoded email template -- see
+        universal-interprter's `prompt_template_store.py`) gets coerced
+        from `str` to `dict`/`list` here too, since this method has no
+        way to distinguish "real app data serialized as JSON text" from
+        "a legitimately JSON-shaped string that must stay a string" --
+        both are simply "a string that starts with `{` and ends with
+        `}`." This adapter deliberately does NOT try to solve that
+        ambiguity generically (declaring the column JSONB instead sidesteps
+        it entirely -- psycopg2 registers global JSON/JSONB typecasters
+        for OIDs 114/3802 automatically at import time, so a genuine
+        `json`/`jsonb` column never even reaches this heuristic, `isinstance
+        (v, str)` already `False` by the time this method sees it); a
+        caller that must keep a TEXT column's string content literal
+        despite it being JSON-shaped owns that coercion at ITS OWN layer
+        instead (see `prompt_template_store.py`'s own `_coerce_content_to_str`
+        for the concrete pattern: re-`json.dumps()` a `content` value that
+        came back non-`str`, restoring the real string every caller of
+        that store is promised). This adapter stays a "dumb storage
+        layer" in the sense that it never MODELS what a column's real
+        semantic type should be -- it does still apply this one generic,
+        best-effort convenience decode uniformly, exactly as it always
+        has.
+        """
         for k, v in list(row.items()):
             if isinstance(v, str):
                 s = v.strip()
