@@ -125,6 +125,19 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         s = re.sub(r"[\\/#\?\x00-\x1f\x7f:+ ]", "_", s)
         return s[:1024] if len(s) > 1024 else s
 
+    def _check_overflow(self, data: JsonDict):  # type: ignore[override]
+        """Azure overflows per PROPERTY inside `_put_raw`, never per record.
+
+        The base class' whole-record overflow replaces the record with a stub
+        of underscore keys (`_overflow`, `_blob_key`, ...), but `_put_raw`
+        drops every key starting with "_" when it builds the entity -- so the
+        stub's pointer was never stored and the real fields of the write were
+        silently lost (only an orphaned blob remained). Returning the data
+        untouched lets `_put_raw` spill each >30KB property on its own, which
+        `_get_raw`/`_query_raw` already rehydrate.
+        """
+        return data, None
+
     def _sanitize_prop_name(self, name: Any) -> str:
         s = str(name)
         s = re.sub(r"[^A-Za-z0-9_]", "_", s)
