@@ -204,6 +204,12 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.18** — `AzureTableStorageAdapter` no longer applies the base class's WHOLE-RECORD overflow (`_check_overflow`, 60 KB).
+  `patch()` (every `core.db.update` in the engine) merges the stored row and ran that check on the merged record; over 60 KB
+  it sent a 4-key `_overflow` stub to `_put_raw`, which drops `_`-prefixed keys, so the update failed or wrote nothing. Seen as one
+  large generated document that "could not be saved" while smaller rows saved fine. Azure already overflows per property (30 KB) in
+  `_put_raw`, and its real limit is 1 MB per entity, so the override returns the data untouched. Test:
+  `tests/test_azure_table_no_whole_record_overflow.py` (reproduced against the unfixed adapter first).
 - **2.5.17** — **Reverted 2.5.16.** That release removed `PostgreSQLAdapter._deserialize_row`'s
   JSON-shaped-string decode heuristic outright, reasoning it was "pure downside" — wrong, and a
   real regression: `altcodepro-universal-interprter`'s own `observability.py` (`Observability.

@@ -339,6 +339,22 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
         return out
 
+    def _check_overflow(self, data: JsonDict):
+        """No whole-record overflow on Azure Table.
+
+        The base class moves the WHOLE record to object storage once its JSON
+        exceeds ``max_size`` (60 KB here) and writes only a 4-key stub. Azure
+        Table already overflows per PROPERTY in ``_put_raw`` (anything over
+        30 KB goes to blob), and its real limit is 1 MB per entity, so this
+        check was both unnecessary and destructive: ``patch()`` (every
+        ``core.db.update``) merged the stored row, saw >60 KB in total, and
+        sent the stub to ``_put_raw``, which drops ``_``-prefixed keys -- the
+        update either failed or wrote an empty entity. Seen live as a large
+        generated document that "could not be saved" while smaller artifacts
+        saved fine.
+        """
+        return data, None
+
     def _sanitize_blob_part(self, value: str) -> str:
         s = str(value).lower()
         s = re.sub(r"[^a-z0-9\-]", "-", s)
