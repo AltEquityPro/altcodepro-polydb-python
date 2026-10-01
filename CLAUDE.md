@@ -204,6 +204,15 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.18** — **Fixed silent data loss on Azure Table writes over 60KB.** `NoSQLKVAdapter.put()/patch()` ran the
+  base class' whole-record `_check_overflow()` (Azure's `max_size` is 60KB) and handed `_put_raw` a stub of
+  underscore keys (`_overflow`, `_blob_key`, `_size`, `_checksum`); `_put_raw` skips every `_`-prefixed key, so the
+  pointer was never stored, `upsert_entity` MERGE wrote nothing from the update, and only an orphaned
+  `overflow/<md5>.json` blob remained. Seen live in `altcodepro-blueprint-engine`: `core.db.update` on `artifacts`
+  returned the stub as success, the re-read row had no `content_url`/`version`/`content_blob_key`. Fix:
+  `AzureTableStorageAdapter._check_overflow` returns the data untouched, so Azure's own per-property (>30KB)
+  overflow in `_put_raw` is the only mechanism. Regression: `tests/test_azure_table_large_record_patch_roundtrip.py`.
+  Rows already damaged are not recoverable from the table (their data is only in orphaned blobs).
 - **2.5.17** — **Reverted 2.5.16.** That release removed `PostgreSQLAdapter._deserialize_row`'s
   JSON-shaped-string decode heuristic outright, reasoning it was "pure downside" — wrong, and a
   real regression: `altcodepro-universal-interprter`'s own `observability.py` (`Observability.
