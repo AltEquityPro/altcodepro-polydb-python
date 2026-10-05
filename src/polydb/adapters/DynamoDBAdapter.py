@@ -196,6 +196,13 @@ class DynamoDBAdapter(NoSQLKVAdapter):
     def _blob_key(self, model: type, pk: str, rk: str, checksum: str) -> str:
         return f"overflow/{self._table_name(model)}/{pk}/{rk}/{checksum}.json"
 
+    def _check_overflow(self, data: JsonDict):  # type: ignore[override]
+        """DynamoDB overflows inside `_put_raw` (`_maybe_overflow_to_s3`, into this adapter's own bucket), never in the
+        base class. The base whole-record overflow replaced the record with a stub pointing at a key in the separate
+        object store, which `_resolve_overflow` (it reads this adapter's bucket) can never find -- the record was lost
+        on read. Returning the data untouched leaves the one working path in charge."""
+        return data, None
+
     def _maybe_overflow_to_s3(
         self, model: type, pk: str, rk: str, payload: JsonDict
     ) -> Optional[JsonDict]:

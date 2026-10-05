@@ -291,7 +291,9 @@ class NoSQLKVAdapter:
     ) -> Tuple[List[JsonDict], Optional[str]]:
         # Basic implementation - override per provider
         offset = int(continuation_token) if continuation_token else 0
-        results = self.query(model, query, limit=page_size + 1)
+        # Fetch through the end of THIS page (+1 to learn whether another follows) and drop what earlier pages already
+        # returned -- reading from the start every time made every page after the first a repeat of the first.
+        results = self.query(model, query, limit=offset + page_size + 1)[offset:]
 
         has_more = len(results) > page_size
         if has_more:

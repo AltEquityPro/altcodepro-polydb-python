@@ -19,7 +19,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional, Set, Tuple, Union
 
-from tenacity import retry, stop_after_attempt, wait_exponential
+from tenacity import retry, retry_if_exception, stop_after_attempt, wait_exponential
 
 from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
 from .audit.context import AuditContext
@@ -32,6 +32,7 @@ from .errors import AdapterConfigurationError
 from .models import PageRequest, PageResult
 from .monitoring import HealthCheck, MetricsCollector, PerformanceMonitor
 from .query import QueryBuilder
+from .retry import _is_non_retryable
 from .security import DataMasking, FieldEncryption
 from .types import JsonDict, Lookup, ModelMeta
 
@@ -52,6 +53,31 @@ _DEFAULT_RETRY = retry(
     stop=stop_after_attempt(3),
     reraise=True,
 )
+
+_TRANSIENT_MARKERS = (
+    "timeout", "timed out", "connection reset", "connection refused", "connection closed", "connection aborted",
+    "server closed the connection", "temporarily unavailable", "too many requests", "throttl", "service unavailable",
+    "serverbusy", "503", "could not connect",
+)
+
+
+def _is_transient(exc: BaseException) -> bool:
+    if _is_non_retryable(exc):
+        return False
+    if isinstance(exc, (ConnectionError, TimeoutError)):
+        return True
+    s = str(exc).lower()
+    return any(m in s for m in _TRANSIENT_MARKERS)
+
+
+def _TRANSIENT_RETRY(fn):
+    return retry(
+        retry=retry_if_exception(_is_transient),
+        wait=wait_exponential(multiplier=0.5, min=0.5, max=6),
+        stop=stop_after_attempt(3),
+        reraise=True,
+    )(fn)
+
 
 _UNIQUE_VIOLATION_MARKERS = (
     "23505",  # Postgres SQLSTATE
@@ -140,6 +166,7 @@ def _extract_meta(model: Union[type, str]) -> ModelMeta:
                 provider=raw.get("provider"),
                 cache=raw.get("cache", False),
                 cache_ttl=raw.get("cache_ttl"),
+                encrypted_fields=tuple(raw.get("encrypted_fields") or ()),
             )
     return ModelMeta(storage="nosql", table=None, collection=None)
 
@@ -348,7 +375,42 @@ class DatabaseFactory:
         return result
 
     def _run(self, fn: Callable[[], Any]) -> Any:
-        return fn()
+        """Run one storage operation, retrying only TRANSIENT failures (connection loss, timeouts, throttling) with
+        exponential backoff when retries are enabled. Constraint violations, bad arguments and anything the retry
+        classifier marks non-retryable are raised at once -- a retry could not change their outcome."""
+        if not self._enable_retries:
+            return fn()
+        return _TRANSIENT_RETRY(fn)()
+
+    def _audit_write(
+        self, action: str, name: str, meta: ModelMeta, entity_id: Any, success: bool,
+        before: Optional[JsonDict], after: Optional[JsonDict], error: Optional[str],
+    ) -> None:
+        """Record a write in the audit log. Never raises: an audit failure must not turn a completed write into an
+        error. Encrypted fields are masked so the log never holds their plaintext."""
+        if not (self._enable_audit and self._audit):
+            return
+
+        def _mask(row: Optional[JsonDict]) -> Optional[JsonDict]:
+            if not row or not meta.encrypted_fields:
+                return row
+            return {k: ("[encrypted]" if k in meta.encrypted_fields else v) for k, v in row.items()}
+
+        try:
+            before_m, after_m = _mask(before), _mask(after)
+            changed = (
+                sorted(k for k in set(after_m or {}) | set(before_m or {}) if (before_m or {}).get(k) != (after_m or {}).get(k))
+                if before_m is not None and after_m is not None else None
+            )
+            if isinstance(entity_id, dict):
+                entity_id = entity_id.get("id")
+            self._audit.record(
+                action=action, model=name, entity_id=None if entity_id is None else str(entity_id),
+                storage_type=meta.storage, provider=meta.provider or "default", success=success,
+                before=before_m, after=after_m, error=error, changed_fields=changed,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Audit write failed (non-fatal): %s", exc)
 
     def _is_sql(self, meta: ModelMeta, override: Optional[EngineOverride] = None) -> bool:
         if override and override.force_sql:
@@ -432,9 +494,12 @@ class DatabaseFactory:
                 with monitor as m:
                     result = self._run(_op)
                     m.rows_affected = 1
-                    return result
-            return self._run(_op)
-        except Exception:
+            else:
+                result = self._run(_op)
+            self._audit_write("create", name, meta, entity_id, True, None, after_plain, None)
+            return result
+        except Exception as exc:
+            self._audit_write("create", name, meta, entity_id, False, None, None, str(exc))
             raise
 
     # ──────────────────────────────────────────────────────────
@@ -467,14 +532,26 @@ class DatabaseFactory:
         projected = bool(fields or omit)
         sql_columns = select_columns(fields, omit, columns)
 
+        drop_deleted = False
         if self._soft_delete and not include_deleted:
-            query = self._apply_soft_delete_filter(query)
+            if self._is_sql(meta, engine_override):
+                query = self._apply_soft_delete_filter(query)
+            else:
+                # A NoSQL equality filter on `deleted_at = None` matches nothing when the attribute was never written
+                # (Azure Table, DynamoDB), so filter the returned rows instead.
+                drop_deleted = True
 
         adapters = self._adapters_for(model, meta, engine_override)
         use_external_cache = (
             self._enable_cache and self._cache and getattr(meta, "cache", False) and not projected
         )
         encrypted_fields = getattr(meta, "encrypted_fields", [])
+        # The cache key must cover everything that changes the result: the query, the window, and the session variables
+        # (e.g. the tenant a row-level-security policy filters by) -- otherwise two callers share an entry.
+        cache_key_query = {
+            "q": query or {}, "limit": limit, "offset": offset,
+            "sv": sorted((session_vars or {}).items()), "e": bool(engine_override),
+        }
 
         def _op() -> List[JsonDict]:
             if self._is_sql(meta, engine_override):
@@ -497,22 +574,27 @@ class DatabaseFactory:
                 nosql_kwargs: Dict[str, Any] = {}
                 if projected:
                     nosql_kwargs = {"fields": fields, "omit": omit}
+                skip = offset or 0
                 raw = adapters.nosql.query(
-                    cls, query=query, limit=limit, no_cache=no_cache or bool(use_external_cache),
-                    **nosql_kwargs,
+                    cls, query=query, limit=(limit + skip) if limit else None,
+                    no_cache=no_cache or bool(use_external_cache), **nosql_kwargs,
                 )
+                if skip:
+                    raw = raw[skip:]  # NoSQL adapters take no offset: read through it, then drop the skipped rows
+            if drop_deleted:
+                raw = [r for r in raw if not r.get("deleted_at")]
             if self.encryption and encrypted_fields:
                 raw = [self.encryption.decrypt_fields(r, encrypted_fields) for r in raw]
             if self._cache and use_external_cache and not no_cache:
                 ttl = cache_ttl or getattr(meta, "cache_ttl", 300)
                 try:
-                    self._cache.set(name, query or {}, raw, ttl)
+                    self._cache.set(name, cache_key_query, raw, ttl)
                 except Exception as _ce:
                     logger.warning("Cache set failed (non-fatal): %s", _ce)
             return raw
 
         if self._cache and use_external_cache and not no_cache:
-            cached = self._cache.get(name, query or {})
+            cached = self._cache.get(name, cache_key_query)
             if cached is not None:
                 return cached
 
@@ -677,9 +759,12 @@ class DatabaseFactory:
                 with monitor as m:
                     result = self._run(_op)
                     m.rows_affected = 1
-                    return result
-            return self._run(_op)
-        except Exception:
+            else:
+                result = self._run(_op)
+            self._audit_write("update", name, meta, entity_id, True, before, after_plain, None)
+            return result
+        except Exception as exc:
+            self._audit_write("update", name, meta, entity_id, False, before, None, str(exc))
             raise
 
     # ──────────────────────────────────────────────────────────
@@ -737,9 +822,12 @@ class DatabaseFactory:
                 with monitor as m:
                     result = self._run(_op)
                     m.rows_affected = 1
-                    return result
-            return self._run(_op)
-        except Exception:
+            else:
+                result = self._run(_op)
+            self._audit_write("upsert", name, meta, (after_plain or {}).get('id'), True, None, after_plain, None)
+            return result
+        except Exception as exc:
+            self._audit_write("upsert", name, meta, None, False, None, None, str(exc))
             raise
 
     # ──────────────────────────────────────────────────────────
@@ -850,9 +938,12 @@ class DatabaseFactory:
                 with monitor as m:
                     result = self._run(_op)
                     m.rows_affected = 1
-                    return result
-            return self._run(_op)
-        except Exception:
+            else:
+                result = self._run(_op)
+            self._audit_write("delete", name, meta, entity_id, True, before, None, None)
+            return result
+        except Exception as exc:
+            self._audit_write("delete", name, meta, entity_id, False, before, None, str(exc))
             raise
 
     # ──────────────────────────────────────────────────────────
@@ -906,8 +997,12 @@ class DatabaseFactory:
         name = _model_name(model)
         meta = _extract_meta(model)
 
+        drop_deleted = False
         if self._soft_delete and not include_deleted:
-            query = self._apply_soft_delete_filter(query)
+            if self._is_sql(meta, engine_override):
+                query = self._apply_soft_delete_filter(query)
+            else:
+                drop_deleted = True
 
         adapters = self._adapters_for(model, meta, engine_override)
         encrypted_fields = getattr(meta, "encrypted_fields", [])
@@ -924,6 +1019,8 @@ class DatabaseFactory:
                     else type(name, (), {"__polydb__": meta.__dict__})
                 )
                 raw, token = adapters.nosql.query_page(cls, query, page_size, continuation_token)
+                if drop_deleted:
+                    raw = [r for r in raw if not r.get("deleted_at")]
             if self.encryption and encrypted_fields:
                 raw = [self.encryption.decrypt_fields(r, encrypted_fields) for r in raw]
             return raw, token
