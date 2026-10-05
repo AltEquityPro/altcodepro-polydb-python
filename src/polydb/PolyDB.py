@@ -158,6 +158,8 @@ class PolyDB:
         cache_ttl: Optional[int] = None,
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        fields: Optional[List[str]] = None,
+        omit: Optional[List[str]] = None,
     ) -> List[JsonDict]:
         return self.db.read(
             model,
@@ -168,6 +170,8 @@ class PolyDB:
             cache_ttl=cache_ttl,
             include_deleted=include_deleted,
             engine_override=engine_override,
+            fields=fields,
+            omit=omit,
         )
 
     def read_one(

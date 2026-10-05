@@ -633,9 +633,35 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 return None
             raise NoSQLError(f"Azure Table get failed: {str(e)}")
 
+    # `fields` / `omit` are sent to Azure as `$select`, so unrequested properties never leave the service.
+    SUPPORTS_SELECT_PUSHDOWN = True
+
+    def _select_properties(self, select: Optional[List[str]]) -> Optional[List[str]]:
+        """The Azure property names to `$select` for the requested field names -- the requested ones, plus what `_unpack_entity`
+        needs to rebuild a row (the keys, the model tag, and the sanitized-name map). A per-property blob overflow is stored in
+        the property itself, so selecting the property is enough for `_restore_overflow_properties`. None = no pushdown: if any
+        requested name is rewritten by `_sanitize_prop_name` (so its stored name could carry a collision suffix), the whole row is
+        fetched and trimmed afterwards instead of risking a silently missing column."""
+        if not select:
+            return None
+        props: List[str] = []
+        for name in select:
+            safe = self._sanitize_prop_name(name)
+            if safe != str(name):
+                return None
+            props.append(safe)
+        for needed in ("PartitionKey", "RowKey", _MODEL_FIELD, "__keymap__"):
+            if needed not in props:
+                props.append(needed)
+        return props
+
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _query_raw(
-        self, model: type, filters: Dict[str, Any], limit: Optional[int]
+        self,
+        model: type,
+        filters: Dict[str, Any],
+        limit: Optional[int],
+        select: Optional[List[str]] = None,
     ) -> List[JsonDict]:
         try:
             table_client = self._get_table_client(model)
@@ -685,7 +711,11 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             else:
                 query_filter = " and ".join(parts)
 
-            entities = table_client.query_entities(query_filter=query_filter)
+            props = self._select_properties(select)
+            if props is None:
+                entities = table_client.query_entities(query_filter=query_filter)
+            else:
+                entities = table_client.query_entities(query_filter=query_filter, select=props)
 
             results: List[JsonDict] = []
             count = 0

@@ -24,7 +24,7 @@ from tenacity import retry, stop_after_attempt, wait_exponential
 from .adapters.PostgreSQLAdapter import PostgreSQLAdapter
 from .audit.context import AuditContext
 from .audit.manager import AuditManager
-from .base.NoSQLKVAdapter import NoSQLKVAdapter
+from .base.NoSQLKVAdapter import NoSQLKVAdapter, project_rows, select_columns
 from .batch import BatchOperations
 from .cache import CacheWarmer, RedisCacheEngine
 from .cloudDatabaseFactory import CloudDatabaseFactory
@@ -453,30 +453,53 @@ class DatabaseFactory:
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
+        fields: Optional[List[str]] = None,
+        omit: Optional[List[str]] = None,
     ) -> List[JsonDict]:
+        """`fields` returns only those keys; `omit` returns every key except those (`fields` wins if both are given). SQL
+        names the columns in the SELECT; NoSQL adapters that can ($select on Azure Table) send the property list to the store,
+        the rest trim the rows after the read -- same result either way. `omit` needs the model's `__polydb__["columns"]` to
+        be turned into a column list for the store; without it the whole row is fetched and trimmed. A projected read never
+        goes through the external cache (its key does not include the projection)."""
         name = _model_name(model)
         meta = _extract_meta(model)
+        columns = (getattr(model, "__polydb__", None) or {}).get("columns") if isinstance(model, type) else None
+        projected = bool(fields or omit)
+        sql_columns = select_columns(fields, omit, columns)
 
         if self._soft_delete and not include_deleted:
             query = self._apply_soft_delete_filter(query)
 
         adapters = self._adapters_for(model, meta, engine_override)
-        use_external_cache = self._enable_cache and self._cache and getattr(meta, "cache", False)
+        use_external_cache = (
+            self._enable_cache and self._cache and getattr(meta, "cache", False) and not projected
+        )
         encrypted_fields = getattr(meta, "encrypted_fields", [])
 
         def _op() -> List[JsonDict]:
             if self._is_sql(meta, engine_override):
-                raw = adapters.sql.select(
-                    meta.table, query, limit=limit, offset=offset, session_vars=session_vars
-                )
+                if sql_columns is not None:
+                    raw = adapters.sql.select(
+                        meta.table, query, limit=limit, offset=offset,
+                        session_vars=session_vars, fields=sql_columns,
+                    )
+                else:
+                    raw = adapters.sql.select(
+                        meta.table, query, limit=limit, offset=offset, session_vars=session_vars
+                    )
+                    raw = project_rows(raw, fields, omit)
             else:
                 cls = (
                     model
                     if isinstance(model, type)
                     else type(name, (), {"__polydb__": meta.__dict__})
                 )
+                nosql_kwargs: Dict[str, Any] = {}
+                if projected:
+                    nosql_kwargs = {"fields": fields, "omit": omit}
                 raw = adapters.nosql.query(
-                    cls, query=query, limit=limit, no_cache=no_cache or bool(use_external_cache)
+                    cls, query=query, limit=limit, no_cache=no_cache or bool(use_external_cache),
+                    **nosql_kwargs,
                 )
             if self.encryption and encrypted_fields:
                 raw = [self.encryption.decrypt_fields(r, encrypted_fields) for r in raw]

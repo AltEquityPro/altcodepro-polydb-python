@@ -487,8 +487,12 @@ class PostgreSQLAdapter:
         tx: Optional[Any] = None,
         *,
         session_vars: Optional[Dict[str, str]] = None,
+        fields: Optional[List[str]] = None,
     ) -> List[JsonDict]:
         table = validate_table_name(table)
+        if fields:
+            for f in fields:
+                validate_column_name(f)
         conn = tx
         own_conn = False
         if not conn:
@@ -498,7 +502,7 @@ class PostgreSQLAdapter:
         try:
             self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
-            sql = f"SELECT * FROM {table}"
+            sql = f"SELECT {', '.join(fields)} FROM {table}" if fields else f"SELECT * FROM {table}"
             params: List[Any] = []
 
             if query:

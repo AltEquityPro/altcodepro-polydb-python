@@ -17,8 +17,42 @@ if TYPE_CHECKING:
     from ..models import PartitionConfig
 
 
+def project_rows(
+    rows: List[JsonDict], fields: Optional[List[str]] = None, omit: Optional[List[str]] = None
+) -> List[JsonDict]:
+    """The exact `fields` / `omit` semantics every NoSQL read shares: `fields` keeps only those keys, `omit` drops those keys
+    (`fields` wins if both are given). Applied by the base `query()` AFTER overflow rehydration, so it is correct for every
+    adapter whether or not it also pushes the projection down to the store."""
+    if fields:
+        keep = set(fields)
+        return [{k: v for k, v in r.items() if k in keep} for r in rows]
+    if omit:
+        drop = set(omit)
+        return [{k: v for k, v in r.items() if k not in drop} for r in rows]
+    return rows
+
+
+def select_columns(
+    fields: Optional[List[str]], omit: Optional[List[str]], columns: Optional[List[str]]
+) -> Optional[List[str]]:
+    """The column list a store can be asked for: `fields` as given, or -- for `omit` -- the model's known `columns` minus the
+    omitted ones. None means "no column list can be derived" (no projection, or `omit` on a model whose columns are unknown):
+    the read then fetches whole rows and `project_rows` trims them."""
+    if fields:
+        return list(fields)
+    if omit and columns:
+        drop = set(omit)
+        return [c for c in columns if c not in drop]
+    return None
+
+
 class NoSQLKVAdapter:
     """Base with auto-overflow and LINQ support"""
+
+    # An adapter sets this True when its `_query_raw` accepts `select=[property names]` and really sends it to the store (Azure
+    # Table's `$select`). False (the default) means `fields`/`omit` are applied after the rows come back -- same result, no
+    # network saving. Opt in per adapter only once the adapter's own rehydration is proven to survive a narrowed row.
+    SUPPORTS_SELECT_PUSHDOWN = False
 
     def __init__(
         self,
@@ -242,9 +276,15 @@ class NoSQLKVAdapter:
         limit: Optional[int] = None,
         no_cache: bool = False,
         cache_ttl: Optional[int] = None,
+        fields: Optional[List[str]] = None,
+        omit: Optional[List[str]] = None,
     ) -> List[JsonDict]:
-        results = self._query_raw(model, query or {}, limit)
-        return [self._retrieve_overflow(r) for r in results]
+        select = select_columns(fields, omit, getattr(model, "__polydb__", {}).get("columns"))
+        if select is not None and self.SUPPORTS_SELECT_PUSHDOWN:
+            results = self._query_raw(model, query or {}, limit, select=select)
+        else:
+            results = self._query_raw(model, query or {}, limit)
+        return project_rows([self._retrieve_overflow(r) for r in results], fields, omit)
 
     def query_page(
         self, model: type, query: Lookup, page_size: int, continuation_token: Optional[str] = None
