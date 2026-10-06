@@ -131,6 +131,27 @@ class SchemaBuilder:
 
         return sql
 
+    def to_add_missing_columns(self, table_name: str) -> List[str]:
+        """`ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for every non-key column. `CREATE TABLE IF NOT EXISTS` never adds a
+        column that was declared after the table was first created; appending these to the same migration makes an edited
+        column list reach existing tables. Added columns are always nullable (existing rows have no value) and never
+        UNIQUE; a declared default is kept."""
+        validate_table_name(table_name)
+        keys = set(self.primary_keys or [])
+        out: List[str] = []
+        for col in self.columns:
+            if col.name in keys or col.primary_key:
+                continue
+            parts = [validate_column_name(col.name)]
+            if col.type == ColumnType.VARCHAR and col.max_length:
+                parts.append(f"VARCHAR({col.max_length})")
+            else:
+                parts.append(col.type.value)
+            if col.default is not None:
+                parts.append(_render_default(col.default))
+            out.append(f"ALTER TABLE {table_name} ADD COLUMN IF NOT EXISTS {' '.join(parts)};")
+        return out
+
     def to_create_indexes(self, table_name: str) -> List[str]:
         """Generate CREATE INDEX statements"""
         statements = []
@@ -185,14 +206,30 @@ class MigrationManager:
 
         # Check if already applied
         existing = self.sql.execute(
-            "SELECT version FROM polydb_migrations WHERE version = %s", [version], fetch_one=True
+            "SELECT version, checksum FROM polydb_migrations WHERE version = %s", [version], fetch_one=True
         )
-
-        if existing:
-            return False
 
         # Calculate checksum
         checksum = hashlib.sha256(up_sql.encode()).hexdigest()
+
+        if existing:
+            stored = existing.get("checksum") if isinstance(existing, dict) else None
+            if not stored or stored == checksum:
+                return False
+            # The DDL under this version was edited (a column added, an index changed). Re-apply it -- the statements
+            # this codebase generates are idempotent (IF NOT EXISTS) -- and remember the new checksum. A failure here
+            # must not stop a deployment from starting: keep the old checksum so the next start tries again.
+            try:
+                self.sql.execute(up_sql)
+                self.sql.execute(
+                    "UPDATE polydb_migrations SET checksum = %s WHERE version = %s", [checksum, version]
+                )
+                return True
+            except Exception as exc:  # noqa: BLE001
+                import logging
+
+                logging.getLogger(__name__).warning("Re-applying edited migration %s failed (kept old): %s", version, exc)
+                return False
 
         try:
             # Execute migration

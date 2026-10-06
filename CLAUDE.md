@@ -204,6 +204,17 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.20** — Correctness fixes from a source read. `ModelMeta.encrypted_fields` now exists (filled from `__polydb__["encrypted_fields"]`), so
+  field encryption runs for any caller that enables it; before, the encrypt/decrypt branches read a field that was never set. Create/update/upsert/delete
+  now write to the audit log (`_audit_write`, never raises, encrypted fields masked). `_run` retries TRANSIENT failures only (timeouts, connection loss,
+  throttling) with backoff when `enable_retries` is on; constraint and argument errors are raised at once. The read-cache key now covers limit, offset and
+  session variables, so two tenants (or two windows) never share an entry. NoSQL: `read(offset=...)` is honoured; `query_page` advances (page 2 used to repeat
+  page 1); soft-deleted rows are filtered after the read (an equality filter on a never-written `deleted_at` matched nothing on Azure Table/DynamoDB);
+  DynamoDB no longer replaces an oversize record with a stub the read path could not resolve (`_check_overflow` returns the data, its own `_put_raw` spills).
+  `MigrationManager.apply_migration` re-applies a version whose DDL checksum changed (a failure keeps the old checksum and does not raise), and
+  `SchemaBuilder.to_add_missing_columns` emits `ADD COLUMN IF NOT EXISTS` so edited column lists reach existing tables. `__version__` and `pyproject` agree again.
+  Tests: `tests/test_factory_wiring.py`.
+
 - **2.5.18** — **Fixed silent data loss on Azure Table writes over 60KB.** `NoSQLKVAdapter.put()/patch()` ran the
   base class' whole-record `_check_overflow()` (Azure's `max_size` is 60KB) and handed `_put_raw` a stub of
   underscore keys (`_overflow`, `_blob_key`, `_size`, `_checksum`); `_put_raw` skips every `_`-prefixed key, so the

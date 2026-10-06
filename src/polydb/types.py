@@ -24,6 +24,8 @@ class ModelMeta:
     provider: Optional[str] = None
     cache: bool = False
     cache_ttl: Optional[int] = None
+    # Fields stored encrypted when the factory has encryption enabled (a tuple: the dataclass is frozen/hashable).
+    encrypted_fields: Tuple[str, ...] = ()
 
 
 @runtime_checkable
