@@ -19,10 +19,24 @@ class AzureKeyVaultAdapter(SecretsAdapter):
         self._initialize_client()
 
     def _initialize_client(self) -> None:
-        from azure.identity import DefaultAzureCredential
         from azure.keyvault.secrets import SecretClient
 
-        self._client = SecretClient(vault_url=self.vault_url, credential=DefaultAzureCredential())
+        self._client = SecretClient(vault_url=self.vault_url, credential=self._build_credential())
+
+    @staticmethod
+    def _build_credential():
+        """Inside Azure Container Apps / App Service / Functions a managed identity is available
+        (IDENTITY_ENDPOINT / MSI_ENDPOINT). DefaultAzureCredential tries EnvironmentCredential FIRST, and a deployment that
+        also exports AZURE_CLIENT_ID + AZURE_CLIENT_SECRET (for some other purpose) then fails with AADSTS7000232
+        "MSI identity should not use ClientSecretCredential". So when a managed identity exists it goes first
+        (AZURE_CLIENT_ID, if set, names a user-assigned identity); the normal chain stays as the fallback, so local
+        development (az login, environment variables) behaves as before."""
+        from azure.identity import ChainedTokenCredential, DefaultAzureCredential, ManagedIdentityCredential
+
+        if os.getenv("IDENTITY_ENDPOINT") or os.getenv("MSI_ENDPOINT"):
+            client_id = os.getenv("AZURE_CLIENT_ID") or None
+            return ChainedTokenCredential(ManagedIdentityCredential(client_id=client_id), DefaultAzureCredential())
+        return DefaultAzureCredential()
 
     # Key Vault secret names may only contain alphanumerics and dashes --
     # our secret keys (e.g. "tenant-42/stripe/api_key") use slashes, so

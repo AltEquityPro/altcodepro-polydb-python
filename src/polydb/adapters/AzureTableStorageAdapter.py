@@ -47,6 +47,59 @@ _RETRY_TOTAL = int(os.getenv("AZURE_TABLE_RETRY_TOTAL", "3"))
 logging.getLogger("azure").setLevel(logging.ERROR)
 
 
+
+def _is_table_missing(exc: BaseException) -> bool:
+    text = f"{type(exc).__name__} {exc}"
+    return "TableNotFound" in text or "The table specified does not exist" in text
+
+
+class _SelfHealingTableClient:
+    """Wraps an Azure TableClient so a table that disappears while the process is running (deleted by hand, a data
+    reset, a restore) is created again and the operation retried once, instead of failing with TableNotFound until
+    the process restarts. Lazy iterators (query_entities / list_entities) are healed only if the failure happens
+    before the first row was produced."""
+
+    _LAZY = ("query_entities", "list_entities")
+
+    def __init__(self, adapter: "AzureTableStorageAdapter", table_name: str, client: Any):
+        self._adapter = adapter
+        self._table_name = table_name
+        self._client = client
+
+    def _heal(self) -> None:
+        self._adapter._ensured_tables.discard(self._table_name)
+        self._adapter._client.create_table_if_not_exists(self._table_name)
+        self._adapter._ensured_tables.add(self._table_name)
+        logger.warning(f"Azure Table {self._table_name} was missing; created it again")
+
+    def __getattr__(self, name: str):
+        target = getattr(self._client, name)
+        if not callable(target):
+            return target
+        if name in self._LAZY:
+            def lazy(*args, **kwargs):
+                produced = False
+                try:
+                    for item in target(*args, **kwargs):
+                        produced = True
+                        yield item
+                except Exception as exc:  # noqa: BLE001
+                    if produced or not _is_table_missing(exc):
+                        raise
+                    self._heal()
+                    yield from getattr(self._client, name)(*args, **kwargs)
+            return lazy
+
+        def call(*args, **kwargs):
+            try:
+                return target(*args, **kwargs)
+            except Exception as exc:  # noqa: BLE001
+                if not _is_table_missing(exc):
+                    raise
+                self._heal()
+                return getattr(self._client, name)(*args, **kwargs)
+        return call
+
 class AzureTableStorageAdapter(NoSQLKVAdapter):
     """
     Azure Table Storage adapter with:
@@ -441,17 +494,21 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 try:
                     self._client.create_table_if_not_exists(table_name)
                     logger.info(f"✅ Azure Table ensured/created: {table_name}")
+                    self._ensured_tables.add(table_name)
                 except Exception as e:
                     msg = str(e)
-                    if "TableAlreadyExists" not in msg and "already exists" not in msg.lower():
-                        logger.warning(f"Could not create table {table_name}: {e}")
-                self._ensured_tables.add(table_name)
+                    if "TableAlreadyExists" in msg or "already exists" in msg.lower():
+                        self._ensured_tables.add(table_name)
+                    else:
+                        # Do NOT remember a failed creation as "ensured": the next call tries again instead of
+                        # failing with TableNotFound for the rest of the process's life.
+                        logger.error(f"Could not create table {table_name}: {e}")
 
             if cached is None:
                 cached = self._client.get_table_client(table_name=table_name)
                 self._table_clients_cache[table_name] = cached
 
-            return cached
+            return _SelfHealingTableClient(self, table_name, cached)
 
     def _restore_overflow_properties(self, entity_dict: JsonDict) -> JsonDict:
         restored = {}
