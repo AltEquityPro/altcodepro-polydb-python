@@ -204,6 +204,8 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.23** — `DatabaseFactory.create` (SQL) no longer turns a unique violation on a NON-key column into an UPDATE of the existing row (declared-unique fields such as `users.email` were silently overwritten). Only `id`/`tenant_id` conflicts keep the create-or-overwrite fallback; any other column raises `UniqueConstraintError`. NoSQL backends already enforce `unique_fields` through the `<table>uq` claim table (2.5.22). Test: `tests/test_create_unique_violation.py`.
+
 - **2.5.22** — NoSQL unique constraints and equality indexes (`base/constraints.py`, mixed into `NoSQLKVAdapter`, so every KV backend). A model that
   lists `unique_fields` / `index_fields` in `__polydb__` (the universal engine fills them from the manifest's per-field `unique` / `index`) gets: an
   INSERT-IF-ABSENT claim row per unique value in a hidden `<table>uq` table (a duplicate raises `UniqueConstraintError`; a claim whose owner is gone or

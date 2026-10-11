@@ -457,6 +457,13 @@ class DatabaseFactory:
                     conflict_cols = _parse_unique_violation_columns(exc)
                     if not conflict_cols or not all(c in data for c in conflict_cols):
                         raise
+                    if not set(conflict_cols) <= {"id", "tenant_id"}:
+                        # A declared-unique NON-key column: a second row with the same value is
+                        # a violation, never a silent overwrite of the existing row.
+                        from .base.constraints import UniqueConstraintError
+
+                        col = conflict_cols[0]
+                        raise UniqueConstraintError(col, data.get(col)) from exc
                     where = {c: data[c] for c in conflict_cols}
                     logger.warning(
                         "insert %s hit unique violation on %s — falling through to update",
