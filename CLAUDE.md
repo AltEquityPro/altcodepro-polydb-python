@@ -204,6 +204,15 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 
 ## Recent changes
 
+- **2.5.22** — NoSQL unique constraints and equality indexes (`base/constraints.py`, mixed into `NoSQLKVAdapter`, so every KV backend). A model that
+  lists `unique_fields` / `index_fields` in `__polydb__` (the universal engine fills them from the manifest's per-field `unique` / `index`) gets: an
+  INSERT-IF-ABSENT claim row per unique value in a hidden `<table>uq` table (a duplicate raises `UniqueConstraintError`; a claim whose owner is gone or
+  moved on is taken over), and one index row per (field, value, entity) in `<table>ix`, which `query()` uses for an equality filter (point reads of
+  the owners, every filter re-checked, stale rows skipped). Claims/index rows are written before the entity and removed after a delete or value change.
+  `_put_new_raw` is the one per-adapter primitive: Azure Table overrides it with `create_entity` (409 = taken, atomic); the base default is a
+  non-atomic get-then-put. Rows written before a field was declared need `adapter.rebuild_constraints(model)` once. `ModelMeta` gained
+  `unique_fields` / `index_fields`. Not covered: DynamoDB/Firestore/Mongo conditional-create overrides (they use the base fallback), and
+  `query_linq` / `query_page` do not use the indexes.
 - **2.5.20** — Correctness fixes from a source read. `ModelMeta.encrypted_fields` now exists (filled from `__polydb__["encrypted_fields"]`), so
   field encryption runs for any caller that enables it; before, the encrypt/decrypt branches read a field that was never set. Create/update/upsert/delete
   now write to the audit log (`_audit_write`, never raises, encrypted fields masked). `_run` retries TRANSIENT failures only (timeouts, connection loss,

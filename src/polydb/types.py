@@ -26,6 +26,9 @@ class ModelMeta:
     cache_ttl: Optional[int] = None
     # Fields stored encrypted when the factory has encryption enabled (a tuple: the dataclass is frozen/hashable).
     encrypted_fields: Tuple[str, ...] = ()
+    # NoSQL: fields that must stay unique across the model / that get an equality lookup index (see base/constraints.py).
+    unique_fields: Tuple[str, ...] = ()
+    index_fields: Tuple[str, ...] = ()
 
 
 @runtime_checkable

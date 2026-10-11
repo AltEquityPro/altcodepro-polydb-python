@@ -40,6 +40,10 @@ _BASE64_RE = re.compile(r"^[A-Za-z0-9+/]*={0,2}$")
 # ensures model isolation across the same table
 _MODEL_FIELD = "__polydb_model__"
 
+
+class _AlreadyExists(Exception):
+    """create_entity found the (PartitionKey, RowKey) taken. Deliberately NOT a NoSQLError so `@retry` does not retry it."""
+
 _CONNECT_TIMEOUT = float(os.getenv("AZURE_TABLE_CONNECT_TIMEOUT", "10"))
 _READ_TIMEOUT = float(os.getenv("AZURE_TABLE_READ_TIMEOUT", "30"))
 _RETRY_TOTAL = int(os.getenv("AZURE_TABLE_RETRY_TOTAL", "3"))
@@ -557,7 +561,9 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
         return restored
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
-    def _put_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> JsonDict:
+    def _put_raw(
+        self, model: type, pk: str, rk: str, data: JsonDict, *, _insert_only: bool = False
+    ) -> JsonDict:
         try:
             table_client = self._get_table_client(model)
             safe_pk = self._sanitize_pk_rk(pk)
@@ -632,7 +638,10 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                 else:
                     reference_entity[k] = v
 
-            table_client.upsert_entity(reference_entity)
+            if _insert_only:
+                table_client.create_entity(reference_entity)  # 409 when the key is taken: atomic claim
+            else:
+                table_client.upsert_entity(reference_entity)
 
             restored = self._unpack_entity(model, entity)
             # Mirror the write-side condition above (line ~521): only
@@ -659,10 +668,26 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             return restored
 
         except Exception as e:
+            if _insert_only and (
+                type(e).__name__ == "ResourceExistsError" or "EntityAlreadyExists" in str(e)
+            ):
+                raise _AlreadyExists() from e
             if "PropertyValueTooLarge" in str(e):
                 raise NoSQLError("Azure Table limit exceeded → must use blob overflow") from e
 
             raise NoSQLError(f"Azure Table put failed: {str(e)}")
+
+    def _put_new_raw(self, model: type, pk: str, rk: str, data: JsonDict) -> bool:
+        """Atomic insert-if-absent via Table Storage's `create_entity` (HTTP 409 when the key exists)."""
+        try:
+            self._put_raw(model, pk, rk, data, _insert_only=True)
+            return True
+        except _AlreadyExists:
+            return False
+
+    def _query_partition_raw(self, model: type, partition: str, limit: Optional[int]) -> List[JsonDict]:
+        """One partition -- a PartitionKey filter, not a table scan."""
+        return self._query_raw(model, {"partition_key": partition}, limit)
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _get_raw(self, model: type, pk: str, rk: str) -> Optional[JsonDict]:

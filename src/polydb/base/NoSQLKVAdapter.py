@@ -12,6 +12,7 @@ from ..json_safe import json_safe
 from ..query import Operator, QueryBuilder
 from ..retry import retry
 from ..types import JsonDict, Lookup
+from .constraints import NoSQLConstraintsMixin, UniqueConstraintError  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
     from ..models import PartitionConfig
@@ -46,7 +47,7 @@ def select_columns(
     return None
 
 
-class NoSQLKVAdapter:
+class NoSQLKVAdapter(NoSQLConstraintsMixin):
     """Base with auto-overflow and LINQ support"""
 
     # An adapter sets this True when its `_query_raw` accepts `select=[property names]` and really sends it to the store (Azure
@@ -266,8 +267,16 @@ class NoSQLKVAdapter:
     # Protocol implementation
     def put(self, model: type, data: JsonDict) -> JsonDict:
         pk, rk = self._get_pk_rk(model, data)
-        store_data, _ = self._check_overflow(data)
-        return self._put_raw(model, pk, rk, store_data)
+
+        def _write() -> JsonDict:
+            store_data, _ = self._check_overflow(data)
+            return self._put_raw(model, pk, rk, store_data)
+
+        uq, ix = self._constraint_fields(model)
+        if not (uq or ix):
+            return _write()
+        previous = self._get_raw(model, pk, rk)
+        return self._constrained_write(model, pk, rk, previous, {**(previous or {}), **data}, _write)
 
     def query(
         self,
@@ -279,6 +288,9 @@ class NoSQLKVAdapter:
         fields: Optional[List[str]] = None,
         omit: Optional[List[str]] = None,
     ) -> List[JsonDict]:
+        indexed = self._indexed_query(model, query or {}, limit)
+        if indexed is not None:
+            return project_rows([self._retrieve_overflow(r) for r in indexed], fields, omit)
         select = select_columns(fields, omit, getattr(model, "__polydb__", {}).get("columns"))
         if select is not None and self.SUPPORTS_SELECT_PUSHDOWN:
             results = self._query_raw(model, query or {}, limit, select=select)
@@ -318,15 +330,25 @@ class NoSQLKVAdapter:
         else:
             pk, rk = self._get_pk_rk(model, {"id": entity_id, **data})
 
-        if not replace:
+        uq, ix = self._constraint_fields(model)
+        constrained = bool(uq or ix) and pk is not None
+        previous: Optional[JsonDict] = None
+        if not replace or constrained:
             existing = self._get_raw(model, pk, rk)  # type: ignore
             if existing:
                 existing = self._retrieve_overflow(existing)
-                existing.update(data)
-                data = existing
+                previous = dict(existing)
+                if not replace:
+                    existing.update(data)
+                    data = existing
 
-        store_data, _ = self._check_overflow(data)
-        return self._put_raw(model, pk, rk, store_data)  # type: ignore
+        def _write() -> JsonDict:
+            store_data, _ = self._check_overflow(data)
+            return self._put_raw(model, pk, rk, store_data)  # type: ignore
+
+        if not constrained:
+            return _write()
+        return self._constrained_write(model, pk, rk, previous, data, _write)  # type: ignore[arg-type]
 
     def upsert(self, model: type, data: JsonDict, *, replace: bool = False) -> JsonDict:
         return self.put(model, data)
@@ -340,7 +362,13 @@ class NoSQLKVAdapter:
         else:
             pk, rk = self._get_pk_rk(model, {"id": entity_id})
 
-        return self._delete_raw(model, pk, rk, etag)  # type: ignore
+        uq, ix = self._constraint_fields(model)
+        if not (uq or ix) or pk is None:
+            return self._delete_raw(model, pk, rk, etag)  # type: ignore
+        existing = self._get_raw(model, pk, rk)  # type: ignore
+        result = self._delete_raw(model, pk, rk, etag)  # type: ignore
+        self._release_all(model, pk, rk, existing)
+        return result
 
     def query_linq_rows(self, model: type, builder: QueryBuilder) -> List[JsonDict]:
         """

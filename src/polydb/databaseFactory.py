@@ -167,6 +167,8 @@ def _extract_meta(model: Union[type, str]) -> ModelMeta:
                 cache=raw.get("cache", False),
                 cache_ttl=raw.get("cache_ttl"),
                 encrypted_fields=tuple(raw.get("encrypted_fields") or ()),
+                unique_fields=tuple(raw.get("unique_fields") or ()),
+                index_fields=tuple(raw.get("index_fields") or ()),
             )
     return ModelMeta(storage="nosql", table=None, collection=None)
 
