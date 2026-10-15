@@ -101,7 +101,7 @@ def test_azure_sends_select_with_the_keys_the_row_needs():
     c = _Client([ENT])
     rows = _adp(c).query(_Model, {"tenant_id": "t1"}, fields=["name", "status"])
     (flt, kw), = c.kwargs
-    assert flt == "tenant_id eq 't1'"
+    assert flt == "PartitionKey eq 't1' and tenant_id eq 't1'"
     assert set(kw["select"]) == {"name", "status", "PartitionKey", "RowKey", "__polydb_model__", "__keymap__"}
     assert rows == [{"name": "n", "status": "ok"}]  # id / tenant_id added by unpack are trimmed back out
 

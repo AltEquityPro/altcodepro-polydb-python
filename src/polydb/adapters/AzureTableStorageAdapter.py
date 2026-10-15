@@ -750,11 +750,33 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
             eff_filters = dict(filters or {})
             parts: List[str] = []
+            # An equality on the model's own pk/rk FIELD is a key lookup: filtering the same value as an ordinary
+            # property made Azure scan the whole table (1.2s for one project's artifacts). Only valid when the key is
+            # built straight from that field (no partition_config template), which is how _get_pk_rk derives it.
+            pk_field = rk_field = None
+            declared = getattr(model, "__polydb__", None) or {}
+            if not getattr(self, "partition_config", None):
+                # Only fields the model declares itself; the defaults (tenant_id / id) are left as property filters
+                # so rows written before a model declared its keys keep matching.
+                pk_field = declared.get("pk_field") or None
+                rk_field = declared.get("rk_field") or None
             for orig_k, orig_v in eff_filters.items():
                 if orig_v is None:
                     continue
 
-                if orig_k in ("partition_key", "PartitionKey"):
+                if (
+                    (pk_field or rk_field)
+                    and isinstance(orig_v, (str, int))
+                    and not isinstance(orig_v, bool)
+                    and orig_k in (pk_field, rk_field)
+                ):
+                    # Keys are sanitized on write, so the key filter uses the sanitized value; the original
+                    # property filter below is kept too because sanitizing can map two raw values to one key.
+                    key_name = "PartitionKey" if orig_k == pk_field else "RowKey"
+                    safe = self._sanitize_pk_rk(orig_v).replace("'", "''")
+                    parts.append(f"{key_name} eq '{safe}'")
+                    sk = self._sanitize_prop_name(orig_k)
+                elif orig_k in ("partition_key", "PartitionKey"):
                     sk = "PartitionKey"
                 elif orig_k in ("row_key", "RowKey"):
                     sk = "RowKey"
