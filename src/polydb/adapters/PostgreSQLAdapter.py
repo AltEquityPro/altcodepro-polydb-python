@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
 import psycopg2.extensions
+import psycopg2.pool
 from psycopg2 import sql as pg_sql
 from psycopg2.extras import Json
 
@@ -33,6 +34,70 @@ from ..utils import validate_column_name, validate_table_name
 # one entry below is simply the one real caller (universal_engine's RLS
 # policies) needs today. Add a name here only when a real caller needs it.
 ALLOWED_SESSION_VARS = frozenset({"app.tenant_id"})
+
+
+
+class BoundedWarmPool(psycopg2.pool.ThreadedConnectionPool):
+    """psycopg2's ThreadedConnectionPool with the two behaviours a bursty web process needs.
+
+    1. A request that finds every connection checked out WAITS (up to `acquire_timeout` seconds) for one to come back, instead of
+       failing at once with "connection pool exhausted". A page load that fans out a dozen requests (some of them running several
+       reads in parallel) used to overflow a 10-connection pool even though each query finished in milliseconds.
+    2. Returned connections are kept open, up to `keepconn` idle ones (stock psycopg2 keeps only `minconn` and CLOSES the rest on
+       every return, so each burst re-opened connections: a TCP + TLS + auth round trip to the server, 300-700 ms on Azure).
+
+    `maxconn` is enforced by a semaphore taken before `getconn` and released after `putconn`, so the underlying pool is never asked
+    for more than `maxconn` connections and its own immediate-failure path cannot be reached."""
+
+    def __init__(self, minconn, maxconn, *args, keepconn=None, acquire_timeout=10.0, **kwargs):
+        super().__init__(minconn, maxconn, *args, **kwargs)
+        keep = minconn if keepconn is None else keepconn
+        self._keep = max(minconn, min(keep, maxconn))
+        self._acquire_timeout = float(acquire_timeout)
+        self._slots = threading.BoundedSemaphore(maxconn)
+
+    def getconn(self, key=None):
+        if not self._slots.acquire(timeout=self._acquire_timeout):
+            raise psycopg2.pool.PoolError(
+                f"connection pool exhausted: waited {self._acquire_timeout:g}s for one of {self.maxconn} connections"
+            )
+        try:
+            return super().getconn(key)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def putconn(self, conn=None, key=None, close=False):
+        held = conn is not None and id(conn) in self._rused
+        try:
+            super().putconn(conn, key, close)
+        finally:
+            if held:
+                self._slots.release()
+
+    def _putconn(self, conn, key=None, close=False):
+        # stock behaviour, except idle connections up to `_keep` (not `minconn`) are retained
+        if self.closed:
+            raise psycopg2.pool.PoolError("connection pool is closed")
+        if key is None:
+            key = self._rused.get(id(conn))
+            if key is None:
+                raise psycopg2.pool.PoolError("trying to put unkeyed connection")
+        if len(self._pool) < self._keep and not close:
+            if not conn.closed:
+                status = conn.info.transaction_status
+                if status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
+                    conn.close()  # server connection lost
+                elif status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
+                    conn.rollback()  # in a transaction or in error
+                    self._pool.append(conn)
+                else:
+                    self._pool.append(conn)
+        else:
+            conn.close()
+        if not self.closed or key in self._used:
+            del self._used[key]
+            del self._rused[id(conn)]
 
 
 class PostgreSQLAdapter:
@@ -135,9 +200,12 @@ class PostgreSQLAdapter:
             _maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
             with self._lock:
                 if not self._pool:
-                    self._pool = psycopg2.pool.ThreadedConnectionPool(
-                        minconn=int(os.getenv("POSTGRES_MIN_CONNECTIONS", "5")),
+                    _minconn = int(os.getenv("POSTGRES_MIN_CONNECTIONS", "5"))
+                    self._pool = BoundedWarmPool(
+                        minconn=_minconn,
                         maxconn=_maxconn,
+                        keepconn=int(os.getenv("POSTGRES_POOL_IDLE_KEEP", "4")),
+                        acquire_timeout=float(os.getenv("POSTGRES_POOL_ACQUIRE_TIMEOUT_S", "10")),
                         dsn=dsn,
                     )
                     self.logger.info(
