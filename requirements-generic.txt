@@ -4,4 +4,4 @@
 pymongo>=4.6.1        # MongoDB with connection pooling
 pika>=1.3.2           # RabbitMQ
 boto3>=1.34.0         # S3-compatible (MinIO, DigitalOcean Spaces)
-psycopg2-binary>=2.9.11
+psycopg[binary,pool]>=3.2

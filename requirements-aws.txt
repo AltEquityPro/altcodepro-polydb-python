@@ -3,4 +3,4 @@
 
 boto3>=1.34.0         # DynamoDB, S3, SQS
 botocore>=1.34.0      # AWS SDK core
-psycopg2-binary>=2.9.11
+psycopg[binary,pool]>=3.2

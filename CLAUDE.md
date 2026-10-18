@@ -170,7 +170,7 @@ data.
   `PostgreSQLAdapter.py`'s `insert`/`select`/`update`/`delete`/`query_linq` is: validate the
   table/column name through `validate_table_name`/`validate_column_name` in
   [utils.py](src/polydb/utils.py) first, then f-string-interpolate the now-validated identifier.
-  `psycopg2.sql.Identifier` composition is used only for the `SAVEPOINT`/`ROLLBACK`/`RELEASE`
+  `psycopg.sql.Identifier` composition is used only for the `SAVEPOINT`/`ROLLBACK`/`RELEASE`
   statements, not as the general mechanism — don't assume it's used everywhere.
 - Formatting: black + isort, line length 100 (`pyproject.toml`).
 
@@ -203,6 +203,27 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 3. Run black/isort and the relevant test markers.
 
 ## Recent changes
+- **2.6.0 -- PostgreSQL moved to psycopg 3, lazy pool, pipelined read batches.** `PostgreSQLAdapter` is now on `psycopg` (v3,
+  `psycopg[binary,pool]`); `psycopg2` is gone from this package. Three things changed together:
+  1. **`LazyPool` replaces `BoundedWarmPool`.** The old pool opened `POSTGRES_MIN_CONNECTIONS` (default 5, QA had 8) connections the
+     moment a process started and held them forever; with an api plus one worker per lane against a server that allows a few dozen
+     clients, the idle reservations alone filled the server ("remaining connection slots are reserved ...") and a new revision
+     could not start. `LazyPool` (on `psycopg_pool.ConnectionPool`) opens connections only when asked, keeps `POSTGRES_POOL_IDLE_KEEP`
+     (default **1**) idle for reuse, closes the rest after `POSTGRES_POOL_MAX_IDLE_S` (default 30), and caps a process at
+     `POSTGRES_MAX_CONNECTIONS` (default **10**, was 100). `POSTGRES_MIN_CONNECTIONS` is no longer read -- setting it high can no
+     longer reserve connections. One probe connection is opened at construction so a bad DSN or a full server still fails loudly.
+     Prepared statements are off (`prepare_threshold=None`).
+  2. **`select_many()` / `read_batch.ReadBatch`.** Postgres runs one statement at a time per connection, but with psycopg 3 *pipeline
+     mode* a client can send many statements without waiting for each answer, so N reads cost ~one round trip and one connection.
+     `select_many(specs)` runs each spec in its own READ ONLY transaction with its own `session_vars` (`set_config(..., true)`), so
+     RLS sees exactly the tenant each spec asked for; a failing spec fails alone (the server skips everything after an error until
+     the next sync, so the skipped specs are sent again in a second pipeline). `ReadBatch` is a thread-side coalescer: while one is
+     the current batch (`use_read_batch`), `select()` and `query_linq()` (without a caller `tx`) queue their query instead of running
+     it and wait for their own rows; it flushes when every unfinished party is waiting, or after `POLYDB_READ_BATCH_WINDOW_MS`
+     (default 5). The engine's `coll.parallel` uses it. Measured at 60 ms RTT, 22 reads: 4.3 s sequential, 0.77 s on 22 threads/7
+     connections (the old way), 0.13 s batched on 1 connection.
+  3. **Parameters.** An empty params list is passed as `None` (psycopg 3 parses `%` whenever a sequence is given). `dict`/list-of-dict
+     values are wrapped with `psycopg.types.json.Jsonb` (it is also accepted by `json` columns).
 
 - **2.5.23** — `DatabaseFactory.create` (SQL) no longer turns a unique violation on a NON-key column into an UPDATE of the existing row (declared-unique fields such as `users.email` were silently overwritten). Only `id`/`tenant_id` conflicts keep the create-or-overwrite fallback; any other column raises `UniqueConstraintError`. NoSQL backends already enforce `unique_fields` through the `<table>uq` claim table (2.5.22). Test: `tests/test_create_unique_violation.py`.
 

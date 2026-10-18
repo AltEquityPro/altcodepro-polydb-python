@@ -146,7 +146,8 @@ class TestTimedExecute:
 
         elapsed = adapter._timed_execute(cursor, "SELECT 1", [], operation="select", table="t")
         assert elapsed >= 0
-        cursor.execute.assert_called_once_with("SELECT 1", [])
+        # psycopg 3 parses `%` as a placeholder whenever a params sequence is passed, even an empty one -> no params is None
+        cursor.execute.assert_called_once_with("SELECT 1", None)
 
     def test_slow_query_warning_emitted(self):
         adapter = self._make_adapter(slow_ms=0.0)  # everything is "slow"

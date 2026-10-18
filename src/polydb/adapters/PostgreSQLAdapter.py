@@ -5,18 +5,21 @@ import json
 import os
 import threading
 import time
+import weakref
 from contextlib import contextmanager
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Any, Dict, Iterator, List, Optional, Tuple, Union
 
-import psycopg2.extensions
-import psycopg2.pool
-from psycopg2 import sql as pg_sql
-from psycopg2.extras import Json
+import psycopg
+import psycopg.pq
+import psycopg_pool
+from psycopg import sql as pg_sql
+from psycopg.types.json import Jsonb as Json
 
 from ..errors import ConnectionError, DatabaseError, InsufficientBalanceError
 from ..query import Operator, QueryBuilder
+from ..read_batch import SelectSpec, current_batch
 from ..retry import retry
 from ..types import JsonDict, Lookup
 from ..utils import validate_column_name, validate_table_name
@@ -37,67 +40,77 @@ ALLOWED_SESSION_VARS = frozenset({"app.tenant_id"})
 
 
 
-class BoundedWarmPool(psycopg2.pool.ThreadedConnectionPool):
-    """psycopg2's ThreadedConnectionPool with the two behaviours a bursty web process needs.
+class PoolError(Exception):
+    """Raised when no connection frees up within the acquire timeout."""
 
-    1. A request that finds every connection checked out WAITS (up to `acquire_timeout` seconds) for one to come back, instead of
-       failing at once with "connection pool exhausted". A page load that fans out a dozen requests (some of them running several
-       reads in parallel) used to overflow a 10-connection pool even though each query finished in milliseconds.
-    2. Returned connections are kept open, up to `keepconn` idle ones (stock psycopg2 keeps only `minconn` and CLOSES the rest on
-       every return, so each burst re-opened connections: a TCP + TLS + auth round trip to the server, 300-700 ms on Azure).
 
-    `maxconn` is enforced by a semaphore taken before `getconn` and released after `putconn`, so the underlying pool is never asked
-    for more than `maxconn` connections and its own immediate-failure path cannot be reached."""
+def _close_pool_quietly(pool) -> None:
+    # A pool that is dropped without closeall() (a test, a process shutting down) must not raise from __del__ -- psycopg_pool's own
+    # finalizer does, because its worker threads outlive the object.
+    try:
+        pool.close(timeout=1.0)
+    except Exception:
+        pass
 
-    def __init__(self, minconn, maxconn, *args, keepconn=None, acquire_timeout=10.0, **kwargs):
-        super().__init__(minconn, maxconn, *args, **kwargs)
-        keep = minconn if keepconn is None else keepconn
-        self._keep = max(minconn, min(keep, maxconn))
-        self._acquire_timeout = float(acquire_timeout)
-        self._slots = threading.BoundedSemaphore(maxconn)
+
+class LazyPool:
+    """A small, lazy, bounded connection pool on psycopg 3 (`psycopg_pool.ConnectionPool`).
+
+    Why not the old eager pool: every process used to open `POSTGRES_MIN_CONNECTIONS` connections the moment it started and keep
+    them for its whole life. With a handful of processes (api plus one worker per lane) and a database that only allows a few dozen
+    clients, the idle reservations alone filled the server ("remaining connection slots are reserved ...") and a new revision or
+    worker could not even start.
+
+    This pool opens connections ONLY when a request needs one, keeps at most `keep` (default 1) idle for reuse, and closes every
+    other idle connection after `max_idle` seconds. `max_size` is a hard ceiling per process. A request that finds every connection
+    in use waits up to `acquire_timeout` seconds instead of failing at once."""
+
+    def __init__(self, dsn: str, *, max_size: int, keep: int = 1, acquire_timeout: float = 10.0,
+                 max_idle: float = 30.0, max_lifetime: float = 1800.0):
+        self.maxconn = max_size
+        self._timeout = float(acquire_timeout)
+        keep = max(0, min(keep, max_size))
+        self._pool = psycopg_pool.ConnectionPool(
+            conninfo=dsn,
+            min_size=keep,
+            max_size=max_size,
+            timeout=self._timeout,
+            max_idle=max_idle,
+            max_lifetime=max_lifetime,
+            reconnect_timeout=30.0,
+            # prepare_threshold=None: no server-side prepared statements (they pin per-connection state and break behind a
+            # transaction-mode pooler); autocommit off keeps the engine's explicit commit/rollback contract.
+            kwargs={"autocommit": False, "prepare_threshold": None},
+            open=False,
+            name="polydb-pg",
+        )
+        self._pool.open()
+        weakref.finalize(self, _close_pool_quietly, self._pool)
 
     def getconn(self, key=None):
-        if not self._slots.acquire(timeout=self._acquire_timeout):
-            raise psycopg2.pool.PoolError(
-                f"connection pool exhausted: waited {self._acquire_timeout:g}s for one of {self.maxconn} connections"
-            )
         try:
-            return super().getconn(key)
-        except BaseException:
-            self._slots.release()
-            raise
+            return self._pool.getconn(timeout=self._timeout)
+        except psycopg_pool.PoolTimeout as e:
+            raise PoolError(
+                f"connection pool exhausted: waited {self._timeout:g}s for one of {self.maxconn} connections"
+            ) from e
 
     def putconn(self, conn=None, key=None, close=False):
-        held = conn is not None and id(conn) in self._rused
-        try:
-            super().putconn(conn, key, close)
-        finally:
-            if held:
-                self._slots.release()
+        if conn is None:
+            return
+        if close:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        self._pool.putconn(conn)
 
-    def _putconn(self, conn, key=None, close=False):
-        # stock behaviour, except idle connections up to `_keep` (not `minconn`) are retained
-        if self.closed:
-            raise psycopg2.pool.PoolError("connection pool is closed")
-        if key is None:
-            key = self._rused.get(id(conn))
-            if key is None:
-                raise psycopg2.pool.PoolError("trying to put unkeyed connection")
-        if len(self._pool) < self._keep and not close:
-            if not conn.closed:
-                status = conn.info.transaction_status
-                if status == psycopg2.extensions.TRANSACTION_STATUS_UNKNOWN:
-                    conn.close()  # server connection lost
-                elif status != psycopg2.extensions.TRANSACTION_STATUS_IDLE:
-                    conn.rollback()  # in a transaction or in error
-                    self._pool.append(conn)
-                else:
-                    self._pool.append(conn)
-        else:
-            conn.close()
-        if not self.closed or key in self._used:
-            del self._used[key]
-            del self._rused[id(conn)]
+    def closeall(self):
+        self._pool.close()
+
+    def used_count(self) -> int:
+        stats = self._pool.get_stats()
+        return max(0, int(stats.get("pool_size", 0)) - int(stats.get("pool_available", 0)))
 
 
 class PostgreSQLAdapter:
@@ -124,7 +137,7 @@ class PostgreSQLAdapter:
 
     def _is_idle(self, conn) -> bool:
         try:
-            return conn.info.transaction_status == psycopg2.extensions.TRANSACTION_STATUS_IDLE
+            return conn.info.transaction_status == psycopg.pq.TransactionStatus.IDLE
         except Exception:
             return False
 
@@ -155,8 +168,6 @@ class PostgreSQLAdapter:
     def _initialize_pool(self):
         try:
             from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
-
-            import psycopg2.pool
 
             dsn = self.connection_string
             if "postgresql://" in dsn:
@@ -197,20 +208,23 @@ class PostgreSQLAdapter:
                 parsed = parsed._replace(query=new_query)
                 dsn = urlunparse(parsed)
 
-            _maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
+            _maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "10"))
             with self._lock:
                 if not self._pool:
-                    _minconn = int(os.getenv("POSTGRES_MIN_CONNECTIONS", "5"))
-                    self._pool = BoundedWarmPool(
-                        minconn=_minconn,
-                        maxconn=_maxconn,
-                        keepconn=int(os.getenv("POSTGRES_POOL_IDLE_KEEP", "4")),
+                    # One probe connection up front so a bad DSN / full server fails here, loudly, exactly as the old eager pool
+                    # did -- and is closed again at once (the pool itself opens connections only on demand).
+                    with psycopg.connect(dsn, connect_timeout=int(os.getenv("POSTGRES_CONNECT_TIMEOUT_S", "30"))) as probe:
+                        probe.execute("SELECT 1")
+                    self._pool = LazyPool(
+                        dsn,
+                        max_size=_maxconn,
+                        keep=int(os.getenv("POSTGRES_POOL_IDLE_KEEP", "1")),
                         acquire_timeout=float(os.getenv("POSTGRES_POOL_ACQUIRE_TIMEOUT_S", "10")),
-                        dsn=dsn,
+                        max_idle=float(os.getenv("POSTGRES_POOL_MAX_IDLE_S", "30")),
                     )
                     self.logger.info(
-                        "PostgreSQL pool initialized: min=%s max=%s",
-                        os.getenv("POSTGRES_MIN_CONNECTIONS", "5"),
+                        "PostgreSQL pool initialized (lazy): idle-keep=%s max=%s",
+                        os.getenv("POSTGRES_POOL_IDLE_KEEP", "1"),
                         _maxconn,
                     )
         except Exception as e:
@@ -220,8 +234,8 @@ class PostgreSQLAdapter:
         if not self._pool:
             return
         try:
-            maxconn = int(os.getenv("POSTGRES_MAX_CONNECTIONS", "100"))
-            used_count = len(getattr(self._pool, "_used", {}))
+            maxconn = self._pool.maxconn
+            used_count = self._pool.used_count()
             pct = (used_count / maxconn * 100) if maxconn else 0
             if pct > 80:
                 self.logger.warning(
@@ -272,7 +286,9 @@ class PostgreSQLAdapter:
         table: str = "",
     ) -> float:
         t0 = time.perf_counter()
-        cursor.execute(sql, params)
+        # psycopg 3 parses `%` as a placeholder whenever a params sequence is given, even an empty one (psycopg2 did not):
+        # no parameters means None, so raw SQL / DDL containing a literal `%` or several statements still runs.
+        cursor.execute(sql, params if params else None)
         duration_ms = (time.perf_counter() - t0) * 1000.0
 
         self.logger.debug(
@@ -391,7 +407,7 @@ class PostgreSQLAdapter:
             return Json(self._json_safe(v))
         if isinstance(v, (list, tuple)):
             # A bare list/tuple of scalars is a real Postgres array column
-            # (e.g. TEXT[]) -- psycopg2 adapts a plain Python list to that
+            # (e.g. TEXT[]) -- psycopg adapts a plain Python list to that
             # natively, so it must pass through untouched here, exactly
             # like _serialize_param already does for query parameters
             # (below). Only a list/tuple actually containing dicts is
@@ -462,7 +478,7 @@ class PostgreSQLAdapter:
         both are simply "a string that starts with `{` and ends with
         `}`." This adapter deliberately does NOT try to solve that
         ambiguity generically (declaring the column JSONB instead sidesteps
-        it entirely -- psycopg2 registers global JSON/JSONB typecasters
+        it entirely -- psycopg registers JSON/JSONB loaders
         for OIDs 114/3802 automatically at import time, so a genuine
         `json`/`jsonb` column never even reaches this heuristic, `isinstance
         (v, str)` already `False` by the time this method sees it); a
@@ -542,8 +558,89 @@ class PostgreSQLAdapter:
                 self._return_connection(conn)
 
     # ---------------------------------------------------------------------
+    # INSERT MANY (pipelined)
+    # ---------------------------------------------------------------------
+
+    def insert_many(
+        self,
+        table: str,
+        rows: List[JsonDict],
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
+    ) -> int:
+        """Insert many rows in ONE transaction and ONE network round trip (psycopg 3 `executemany` runs in pipeline mode).
+
+        All-or-nothing: if any row fails the whole batch is rolled back and a DatabaseError is raised (the caller -- see
+        `write_behind.WriteBehind` -- then retries the rows one by one). Rows may have different column sets; they are grouped by
+        column set, and every group is sent inside the same transaction. No RETURNING: this is for rows nobody reads back."""
+        table = validate_table_name(table)
+        if not rows:
+            return 0
+        groups: Dict[Tuple[str, ...], List[JsonDict]] = {}
+        for row in rows:
+            cols = tuple(row.keys())
+            for c in cols:
+                validate_column_name(c)
+            groups.setdefault(cols, []).append(row)
+
+        conn = self._get_connection()
+        try:
+            self._apply_session_vars(conn, session_vars)
+            t0 = time.perf_counter()
+            with conn.cursor() as cursor:
+                for cols, group in groups.items():
+                    placeholders = ", ".join(["%s"] * len(cols))
+                    sql = f"INSERT INTO {table} ({', '.join(cols)}) VALUES ({placeholders})"
+                    cursor.executemany(sql, [[self._serialize_value(r[c]) for c in cols] for r in group])
+            conn.commit()
+            self._log_batch(len(rows), (time.perf_counter() - t0) * 1000.0)
+            return len(rows)
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            raise DatabaseError(f"Insert many failed: {str(e)}")
+        finally:
+            self._return_connection(conn)
+
+    # ---------------------------------------------------------------------
     # SELECT
     # ---------------------------------------------------------------------
+
+    @staticmethod
+    def _build_select(
+        table: str,
+        query: Optional[Lookup],
+        limit: Optional[int],
+        offset: Optional[int],
+        fields: Optional[List[str]],
+    ) -> Tuple[str, List[Any]]:
+        """The SQL text and bind parameters of a plain `select()` -- a pure function, shared by the single and the pipelined path."""
+        sql = f"SELECT {', '.join(fields)} FROM {table}" if fields else f"SELECT * FROM {table}"
+        params: List[Any] = []
+        if query:
+            where_parts: List[str] = []
+            for k, v in query.items():
+                validate_column_name(k)
+                if v is None:
+                    where_parts.append(f"{k} IS NULL")
+                elif isinstance(v, (list, tuple)):
+                    placeholders = ",".join(["%s"] * len(v))
+                    where_parts.append(f"{k} IN ({placeholders})")
+                    params.extend(list(v))
+                else:
+                    where_parts.append(f"{k} = %s")
+                    params.append(v)
+            if where_parts:
+                sql += " WHERE " + " AND ".join(where_parts)
+        if limit:
+            sql += " LIMIT %s"
+            params.append(limit)
+        if offset:
+            sql += " OFFSET %s"
+            params.append(offset)
+        return sql, params
 
     @retry(max_attempts=3, delay=1.0, exceptions=(DatabaseError,))
     def select(
@@ -561,6 +658,16 @@ class PostgreSQLAdapter:
         if fields:
             for f in fields:
                 validate_column_name(f)
+
+        # Inside a ReadBatch (the engine's coll.parallel) this query is queued and sent together with its siblings in one
+        # pipelined round trip on one connection -- see polydb/read_batch.py. A caller-supplied transaction is never batched.
+        batch = current_batch() if tx is None else None
+        if batch is not None:
+            return batch.submit(
+                self,
+                SelectSpec(table=table, query=query, limit=limit, offset=offset, fields=fields, session_vars=session_vars),
+            )
+
         conn = tx
         own_conn = False
         if not conn:
@@ -570,31 +677,7 @@ class PostgreSQLAdapter:
         try:
             self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
-            sql = f"SELECT {', '.join(fields)} FROM {table}" if fields else f"SELECT * FROM {table}"
-            params: List[Any] = []
-
-            if query:
-                where_parts: List[str] = []
-                for k, v in query.items():
-                    validate_column_name(k)
-                    if v is None:
-                        where_parts.append(f"{k} IS NULL")
-                    elif isinstance(v, (list, tuple)):
-                        placeholders = ",".join(["%s"] * len(v))
-                        where_parts.append(f"{k} IN ({placeholders})")
-                        params.extend(list(v))
-                    else:
-                        where_parts.append(f"{k} = %s")
-                        params.append(v)
-                if where_parts:
-                    sql += " WHERE " + " AND ".join(where_parts)
-
-            if limit:
-                sql += " LIMIT %s"
-                params.append(limit)
-            if offset:
-                sql += " OFFSET %s"
-                params.append(offset)
+            sql, params = self._build_select(table, query, limit, offset, fields)
 
             self._timed_execute(
                 cursor, sql, self._serialize_params(params), operation="select", table=table
@@ -615,6 +698,119 @@ class PostgreSQLAdapter:
         finally:
             if own_conn and conn:
                 self._return_connection(conn)
+
+    def select_many(self, specs: List[SelectSpec]) -> List[Any]:
+        """Run several SELECTs in ONE round trip on ONE connection (psycopg 3 pipeline mode).
+
+        Returns one entry per spec, in order: the rows (list of dicts), or a `DatabaseError` for a query that failed. A failing
+        query never poisons the others: Postgres skips every statement after an error until the next sync point, so the specs
+        that were skipped are simply sent again in a second pipeline (one extra round trip per failure, nothing in the common
+        case).
+
+        Every query keeps the guarantees a connection of its own would give it: it runs in its own READ ONLY transaction, with its
+        own `session_vars` applied via `set_config(name, value, true)` (transaction-local, so row-level security sees exactly the
+        tenant that spec asked for and nothing leaks to the next spec or the next borrower of the connection)."""
+        results: List[Any] = [None] * len(specs)
+        if not specs:
+            return results
+
+        built: List[Optional[Tuple[str, List[Any]]]] = []
+        for i, sp in enumerate(specs):
+            try:
+                table = validate_table_name(sp.table)
+                if sp.fields:
+                    for f in sp.fields:
+                        validate_column_name(f)
+                if sp.builder is not None:
+                    sql, params = self._build_linq(table, sp.builder)
+                else:
+                    sql, params = self._build_select(table, sp.query, sp.limit, sp.offset, sp.fields)
+                for k in (sp.session_vars or {}):
+                    if k not in ALLOWED_SESSION_VARS:
+                        raise DatabaseError(
+                            f"session_vars: {k!r} is not in the allow-list of Postgres "
+                            f"session variables this adapter will set"
+                        )
+                built.append((sql, self._serialize_params(params)))
+            except Exception as e:  # a malformed spec fails alone
+                built.append(None)
+                results[i] = e if isinstance(e, DatabaseError) else DatabaseError(f"Select failed: {e}")
+
+        pending = [i for i in range(len(specs)) if built[i] is not None]
+        if not pending:
+            return results
+
+        conn = self._get_connection()
+        t0 = time.perf_counter()
+        broken = False
+        try:
+            conn.autocommit = True
+            while pending:
+                cursors: Dict[int, Any] = {}
+                pipeline_error: Optional[BaseException] = None
+                try:
+                    with conn.pipeline():
+                        for i in pending:
+                            sql, params = built[i]  # type: ignore[misc]
+                            conn.execute("ROLLBACK")  # no-op when idle; clears a transaction the previous failure left aborted
+                            conn.execute("BEGIN READ ONLY")
+                            for k, v in (specs[i].session_vars or {}).items():
+                                conn.execute("SELECT set_config(%s, %s, true)", [k, str(v)])
+                            cur = conn.cursor()
+                            cur.execute(sql, params)
+                            conn.execute("COMMIT")
+                            cursors[i] = cur
+                except Exception as e:  # the first failing statement; everything after it was skipped by the server
+                    pipeline_error = e
+
+                skipped: List[int] = []
+                failed_seen = False
+                for i in pending:
+                    if failed_seen:
+                        skipped.append(i)
+                        continue
+                    cur = cursors.get(i)
+                    try:
+                        if specs[i].builder is not None and specs[i].builder.count_only:
+                            results[i] = cur.fetchone()[0]  # type: ignore[union-attr]
+                        else:
+                            columns = [d[0] for d in cur.description]  # type: ignore[union-attr]
+                            results[i] = [self._deserialize_row(dict(zip(columns, r))) for r in cur.fetchall()]  # type: ignore[union-attr]
+                    except Exception as e:
+                        failed_seen = True
+                        cause = pipeline_error if pipeline_error is not None else e
+                        results[i] = DatabaseError(f"Select failed: {str(cause)}")
+                if not failed_seen and pipeline_error is not None:
+                    # the pipeline failed after every result was already in (e.g. COMMIT of the last spec): nothing is lost
+                    pass
+                pending = skipped
+        except Exception:
+            broken = True
+            raise
+        finally:
+            try:
+                if not conn.closed:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                    conn.autocommit = False
+            except Exception:
+                broken = True
+            if broken:
+                self._pool.putconn(conn, close=True)  # type: ignore[union-attr]
+            else:
+                self._return_connection(conn)
+            self._log_batch(len(specs), (time.perf_counter() - t0) * 1000.0)
+        return results
+
+    def _log_batch(self, n: int, duration_ms: float) -> None:
+        self.logger.debug("SQL pipeline executed: statements=%d duration_ms=%.1f", n, duration_ms)
+        if duration_ms > self._slow_query_ms:
+            self.logger.warning(
+                "Slow query detected: operation=select_many statements=%d duration_ms=%.1f threshold=%.1f",
+                n, duration_ms, self._slow_query_ms,
+            )
 
     # ---------------------------------------------------------------------
     # SELECT PAGE
@@ -835,11 +1031,63 @@ class PostgreSQLAdapter:
     # LINQ QUERY
     # ---------------------------------------------------------------------
 
+    @staticmethod
+    def _build_linq(table: str, builder: QueryBuilder) -> Tuple[str, List[Any]]:
+        """The SQL text and bind parameters of a `query_linq()` -- a pure function, shared by the single and the pipelined path."""
+        if builder.count_only:
+            sql = f"SELECT COUNT(*) FROM {table}"
+        elif builder.selected_fields:
+            for f in builder.selected_fields:
+                validate_column_name(f)
+            fields = ", ".join(builder.selected_fields)
+            if builder.distinct_flag:
+                sql = f"SELECT DISTINCT {fields} FROM {table}"
+            else:
+                sql = f"SELECT {fields} FROM {table}"
+        else:
+            sql = f"SELECT * FROM {table}"
+
+        params: List[Any] = []
+        where_clause, where_params = builder.to_sql_where()
+        if where_clause:
+            sql += f" WHERE {where_clause}"
+            params.extend(where_params)
+
+        if builder.group_by_fields:
+            for f in builder.group_by_fields:
+                validate_column_name(f)
+            sql += f" GROUP BY {', '.join(builder.group_by_fields)}"
+
+        if builder.order_by_fields:
+            order_parts = []
+            for field, desc in builder.order_by_fields:
+                validate_column_name(field)
+                direction = "DESC" if desc else "ASC"
+                order_parts.append(f"{field} {direction}")
+            sql += f" ORDER BY {', '.join(order_parts)}"
+
+        if builder.take_count is not None:
+            sql += " LIMIT %s"
+            params.append(builder.take_count)
+
+        if builder.skip_count:
+            sql += " OFFSET %s"
+            params.append(builder.skip_count)
+        return sql, params
+
     @retry(max_attempts=3, delay=1.0, exceptions=(DatabaseError,))
     def query_linq(
-        self, table: str, builder: QueryBuilder, tx: Optional[Any] = None
+        self,
+        table: str,
+        builder: QueryBuilder,
+        tx: Optional[Any] = None,
+        *,
+        session_vars: Optional[Dict[str, str]] = None,
     ) -> Union[List[JsonDict], int]:
         table = validate_table_name(table)
+        batch = current_batch() if tx is None else None
+        if batch is not None:
+            return batch.submit(self, SelectSpec(table=table, builder=builder, session_vars=session_vars))
         conn = tx
         own_conn = False
         if not conn:
@@ -847,46 +1095,10 @@ class PostgreSQLAdapter:
             own_conn = True
 
         try:
+            if own_conn:
+                self._apply_session_vars(conn, session_vars)
             cursor = conn.cursor()
-            if builder.count_only:
-                sql = f"SELECT COUNT(*) FROM {table}"
-            elif builder.selected_fields:
-                for f in builder.selected_fields:
-                    validate_column_name(f)
-                fields = ", ".join(builder.selected_fields)
-                if builder.distinct_flag:
-                    sql = f"SELECT DISTINCT {fields} FROM {table}"
-                else:
-                    sql = f"SELECT {fields} FROM {table}"
-            else:
-                sql = f"SELECT * FROM {table}"
-
-            params: List[Any] = []
-            where_clause, where_params = builder.to_sql_where()
-            if where_clause:
-                sql += f" WHERE {where_clause}"
-                params.extend(where_params)
-
-            if builder.group_by_fields:
-                for f in builder.group_by_fields:
-                    validate_column_name(f)
-                sql += f" GROUP BY {', '.join(builder.group_by_fields)}"
-
-            if builder.order_by_fields:
-                order_parts = []
-                for field, desc in builder.order_by_fields:
-                    validate_column_name(field)
-                    direction = "DESC" if desc else "ASC"
-                    order_parts.append(f"{field} {direction}")
-                sql += f" ORDER BY {', '.join(order_parts)}"
-
-            if builder.take_count is not None:
-                sql += " LIMIT %s"
-                params.append(builder.take_count)
-
-            if builder.skip_count:
-                sql += " OFFSET %s"
-                params.append(builder.skip_count)
+            sql, params = self._build_linq(table, builder)
 
             self._timed_execute(
                 cursor, sql, self._serialize_params(params), operation="query_linq", table=table

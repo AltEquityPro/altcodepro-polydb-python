@@ -13,4 +13,4 @@ googleapis-common-protos>=1.72.0
 grpc-google-iam-v1>=0.14.3
 grpcio>=1.78.0
 grpcio-status>=1.78.0
-psycopg2-binary>=2.9.11
+psycopg[binary,pool]>=3.2

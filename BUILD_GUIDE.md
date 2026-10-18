@@ -50,7 +50,7 @@ twine upload dist/*
 ```bash
 pip install altcodepro-polydb-python
 ```
-**Dependencies**: `psycopg2-binary>=2.9.9`
+**Dependencies**: `psycopg[binary,pool]>=3.2` (psycopg 3)
 
 ### Generic Stack (Cheapest)
 ```bash
@@ -155,8 +155,9 @@ CLOUD_PROVIDER=postgresql  # or aws, azure, gcp, vercel
 
 # PostgreSQL
 POSTGRES_CONNECTION_STRING=postgresql://user:pass@host:5432/db
-POSTGRES_MIN_CONNECTIONS=2
-POSTGRES_MAX_CONNECTIONS=10
+POSTGRES_POOL_IDLE_KEEP=1      # idle connections kept for reuse (nothing is opened until needed)
+POSTGRES_MAX_CONNECTIONS=10    # hard ceiling per process
+POSTGRES_POOL_MAX_IDLE_S=30    # other idle connections are closed after this many seconds
 
 # MongoDB
 MONGODB_URI=mongodb://localhost:27017

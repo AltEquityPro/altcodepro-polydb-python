@@ -14,7 +14,7 @@ mypy>=1.8.0
 isort>=5.13.0
 
 # Core
-psycopg2-binary>=2.9.11
+psycopg[binary,pool]>=3.2
 
 # Testing providers
 pymongo>=4.6.1

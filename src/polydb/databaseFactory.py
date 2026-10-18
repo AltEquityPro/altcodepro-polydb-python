@@ -425,6 +425,20 @@ class DatabaseFactory:
     # CREATE
     # ──────────────────────────────────────────────────────────
 
+    def _write_behind_queue(self):
+        wb = getattr(self, "_wb", None)
+        if wb is None:
+            from .write_behind import WriteBehind
+
+            wb = self._wb = WriteBehind()
+        return wb
+
+    def flush_background_writes(self, timeout: float = 10.0) -> None:
+        """Block until every `create(..., background=True)` row has been written. A no-op when none were queued."""
+        wb = getattr(self, "_wb", None)
+        if wb is not None:
+            wb.flush(timeout)
+
     def create(
         self,
         model: Union[type, str],
@@ -432,10 +446,19 @@ class DatabaseFactory:
         *,
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
+        background: bool = False,
     ) -> JsonDict:
+        """`background=True` is for telemetry-style rows nobody reads back in the same request (audit / event / query log): the row is
+        queued and written by one background thread in batches -- see write_behind.py. It returns the row as it will be stored (not a
+        database round trip), and applies only to a SQL model; anything else is written inline as usual."""
         meta = _extract_meta(model)
         name = _model_name(model)
         data = self._inject_audit_fields(data, is_create=True)
+        if background and self._is_sql(meta, engine_override) and not getattr(meta, "encrypted_fields", None):
+            self._write_behind_queue().submit(
+                self._adapters_for(model, meta, engine_override).sql, meta.table, data, session_vars
+            )
+            return data
 
         encrypted_fields = getattr(meta, "encrypted_fields", [])
         if self.encryption and encrypted_fields:

@@ -6,4 +6,4 @@ azure-data-tables>=12.7.0
 azure-storage-blob>=12.28.0
 azure-storage-file-share>=12.24.0
 azure-storage-queue>=12.15.0
-psycopg2-binary>=2.9.11
+psycopg[binary,pool]>=3.2
