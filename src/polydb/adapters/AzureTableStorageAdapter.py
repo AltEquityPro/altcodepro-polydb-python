@@ -785,22 +785,34 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                         self._sanitize_prop_name(orig_k) if orig_k != _MODEL_FIELD else _MODEL_FIELD
                     )
 
-                ev = self._encode_value(orig_v)
+                def _eq(prop: str, raw: Any) -> str:
+                    ev = self._encode_value(raw)
+                    if ev is None:
+                        return f"{prop} eq null"
+                    if isinstance(ev, bool):
+                        return f"{prop} eq {str(ev).lower()}"
+                    if isinstance(ev, (int, float)):
+                        return f"{prop} eq {ev}"
+                    if isinstance(ev, datetime):
+                        iso = ev.isoformat()
+                        if not iso.endswith("Z"):
+                            iso = iso + "Z"
+                        return f"{prop} eq datetime'{iso}'"
+                    return f"{prop} eq '{str(ev).replace(chr(39), chr(39) * 2)}'"
 
-                if ev is None:
-                    parts.append(f"{sk} eq null")
-                elif isinstance(ev, bool):
-                    parts.append(f"{sk} eq {str(ev).lower()}")
-                elif isinstance(ev, (int, float)):
-                    parts.append(f"{sk} eq {ev}")
-                elif isinstance(ev, datetime):
-                    iso = ev.isoformat()
-                    if not iso.endswith("Z"):
-                        iso = iso + "Z"
-                    parts.append(f"{sk} eq datetime'{iso}'")
-                else:
-                    sval = str(ev).replace("'", "''")
-                    parts.append(f"{sk} eq '{sval}'")
+                if isinstance(orig_v, (list, tuple, set, frozenset)) and all(
+                    isinstance(x, (str, int, float, bool)) for x in orig_v
+                ):
+                    # A list of plain values means "equals any of them" (the SQL adapters already read it that way). Sent as
+                    # one JSON-encoded string it matched no row at all, so every `field: [a, b]` lookup silently returned [].
+                    if not orig_v:
+                        return []  # IN () matches nothing
+                    if len(orig_v) > 100:
+                        raise NoSQLError("Azure Table filter: at most 100 values in a list")
+                    parts.append("(" + " or ".join(_eq(sk, x) for x in orig_v) + ")")
+                    continue
+
+                parts.append(_eq(sk, orig_v))
 
             # Empty-filter contract: if the caller passed filter keys but every
             # condition dropped out (e.g. all values None/unresolvable), the query
