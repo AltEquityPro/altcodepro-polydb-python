@@ -29,6 +29,7 @@ from .batch import BatchOperations
 from .cache import CacheWarmer, RedisCacheEngine
 from .cloudDatabaseFactory import CloudDatabaseFactory
 from .errors import AdapterConfigurationError
+from .etag import ETAG_KEY, expose_etag
 from .models import PageRequest, PageResult
 from .monitoring import HealthCheck, MetricsCollector, PerformanceMonitor
 from .query import QueryBuilder
@@ -68,6 +69,18 @@ def _is_transient(exc: BaseException) -> bool:
         return True
     s = str(exc).lower()
     return any(m in s for m in _TRANSIENT_MARKERS)
+
+
+def _scoped(fn: Callable[[], Any], with_etag: bool) -> Callable[[], Any]:
+    """Run one operation with row version tags exposed (`_etag`) when the caller asked; otherwise untouched."""
+    if not with_etag:
+        return fn
+
+    def run() -> Any:
+        with expose_etag(True):
+            return fn()
+
+    return run
 
 
 def _TRANSIENT_RETRY(fn):
@@ -394,6 +407,8 @@ class DatabaseFactory:
             return
 
         def _mask(row: Optional[JsonDict]) -> Optional[JsonDict]:
+            if row and ETAG_KEY in row:
+                row = {k: v for k, v in row.items() if k != ETAG_KEY}
             if not row or not meta.encrypted_fields:
                 return row
             return {k: ("[encrypted]" if k in meta.encrypted_fields else v) for k, v in row.items()}
@@ -447,6 +462,7 @@ class DatabaseFactory:
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
         background: bool = False,
+        with_etag: bool = False,
     ) -> JsonDict:
         """`background=True` is for telemetry-style rows nobody reads back in the same request (audit / event / query log): the row is
         queued and written by one background thread in batches -- see write_behind.py. It returns the row as it will be stored (not a
@@ -518,6 +534,7 @@ class DatabaseFactory:
                     logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
+        _op = _scoped(_op, with_etag)
         try:
             monitor = (
                 PerformanceMonitor(self.metrics, "create", name, None) if self.metrics else None
@@ -552,6 +569,7 @@ class DatabaseFactory:
         session_vars: Optional[Dict[str, str]] = None,
         fields: Optional[List[str]] = None,
         omit: Optional[List[str]] = None,
+        with_etag: bool = False,
     ) -> List[JsonDict]:
         """`fields` returns only those keys; `omit` returns every key except those (`fields` wins if both are given). SQL
         names the columns in the SELECT; NoSQL adapters that can ($select on Azure Table) send the property list to the store,
@@ -575,7 +593,7 @@ class DatabaseFactory:
 
         adapters = self._adapters_for(model, meta, engine_override)
         use_external_cache = (
-            self._enable_cache and self._cache and getattr(meta, "cache", False) and not projected
+            self._enable_cache and self._cache and getattr(meta, "cache", False) and not projected and not with_etag
         )
         encrypted_fields = getattr(meta, "encrypted_fields", [])
         # The cache key must cover everything that changes the result: the query, the window, and the session variables
@@ -625,6 +643,7 @@ class DatabaseFactory:
                     logger.warning("Cache set failed (non-fatal): %s", _ce)
             return raw
 
+        _op = _scoped(_op, with_etag)
         if self._cache and use_external_cache and not no_cache:
             cached = self._cache.get(name, cache_key_query)
             if cached is not None:
@@ -647,6 +666,7 @@ class DatabaseFactory:
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
+        with_etag: bool = False,
     ) -> Optional[JsonDict]:
         rows = self.read(
             model,
@@ -656,6 +676,7 @@ class DatabaseFactory:
             include_deleted=include_deleted,
             engine_override=engine_override,
             session_vars=session_vars,
+            with_etag=with_etag,
         )
         return rows[0] if rows else None
 
@@ -673,9 +694,14 @@ class DatabaseFactory:
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
+        with_etag: bool = False,
     ) -> JsonDict:
+        """`etag` makes the write conditional: it succeeds only if the row still has that version (`ConcurrencyError`
+        otherwise; `OperationNotSupportedError` on a backend without conditional writes). `with_etag=True` returns the new
+        version as `_etag` in the result, so updates can be chained. See polydb.etag."""
         name = _model_name(model)
         meta = _extract_meta(model)
+        data = {k: v for k, v in data.items() if k != ETAG_KEY}  # a row read with_etag may be passed back as-is
         data = self._inject_audit_fields(data, is_create=False)
 
         encrypted_fields = getattr(meta, "encrypted_fields", [])
@@ -783,6 +809,7 @@ class DatabaseFactory:
                     logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
+        _op = _scoped(_op, with_etag)
         try:
             monitor = (
                 PerformanceMonitor(self.metrics, "update", name, None) if self.metrics else None
@@ -811,9 +838,11 @@ class DatabaseFactory:
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
         session_vars: Optional[Dict[str, str]] = None,
+        with_etag: bool = False,
     ) -> JsonDict:
         name = _model_name(model)
         meta = _extract_meta(model)
+        data = {k: v for k, v in data.items() if k != ETAG_KEY}
         data = self._inject_audit_fields(data, is_create=True)
 
         encrypted_fields = getattr(meta, "encrypted_fields", [])
@@ -846,6 +875,7 @@ class DatabaseFactory:
                     logger.warning("Cache invalidate failed (non-fatal): %s", _ce)
             return after_plain
 
+        _op = _scoped(_op, with_etag)
         try:
             monitor = (
                 PerformanceMonitor(self.metrics, "upsert", name, None) if self.metrics else None

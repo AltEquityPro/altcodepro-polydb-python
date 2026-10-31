@@ -12,6 +12,7 @@ from ..json_safe import json_safe
 from ..query import Operator, QueryBuilder
 from ..retry import retry
 from ..types import JsonDict, Lookup
+from ..etag import ETAG_KEY
 from .constraints import NoSQLConstraintsMixin, UniqueConstraintError  # noqa: F401  (re-exported)
 
 if TYPE_CHECKING:
@@ -25,7 +26,7 @@ def project_rows(
     (`fields` wins if both are given). Applied by the base `query()` AFTER overflow rehydration, so it is correct for every
     adapter whether or not it also pushes the projection down to the store."""
     if fields:
-        keep = set(fields)
+        keep = set(fields) | {"_etag"}  # `_etag` is only present when the caller asked for it (polydb.etag)
         return [{k: v for k, v in r.items() if k in keep} for r in rows]
     if omit:
         drop = set(omit)
@@ -314,6 +315,18 @@ class NoSQLKVAdapter(NoSQLConstraintsMixin):
         next_token = str(offset + page_size) if has_more else None
         return results, next_token
 
+    def _require_etag_support(self, etag: Optional[str]) -> None:
+        """An etag is a promise of optimistic concurrency. A backend that cannot keep it must say so, not ignore it."""
+        if etag is None:
+            return
+        caps = getattr(self, "capabilities", None)
+        if not getattr(caps, "supports_etag", False):
+            from ..errors import OperationNotSupportedError
+
+            raise OperationNotSupportedError(
+                f"{type(self).__name__} does not support conditional writes (etag); omit etag or use a backend that does"
+            )
+
     def patch(
         self,
         model: type,
@@ -330,12 +343,15 @@ class NoSQLKVAdapter(NoSQLConstraintsMixin):
         else:
             pk, rk = self._get_pk_rk(model, {"id": entity_id, **data})
 
+        self._require_etag_support(etag)
+        data = {k: v for k, v in data.items() if k != ETAG_KEY}  # a round-tripped row may carry its read-only `_etag`
         uq, ix = self._constraint_fields(model)
         constrained = bool(uq or ix) and pk is not None
         previous: Optional[JsonDict] = None
         if not replace or constrained:
             existing = self._get_raw(model, pk, rk)  # type: ignore
             if existing:
+                existing.pop(ETAG_KEY, None)
                 existing = self._retrieve_overflow(existing)
                 previous = dict(existing)
                 if not replace:
@@ -344,7 +360,9 @@ class NoSQLKVAdapter(NoSQLConstraintsMixin):
 
         def _write() -> JsonDict:
             store_data, _ = self._check_overflow(data)
-            return self._put_raw(model, pk, rk, store_data)  # type: ignore
+            if etag is None:
+                return self._put_raw(model, pk, rk, store_data)  # type: ignore
+            return self._put_raw(model, pk, rk, store_data, etag=etag)  # type: ignore[call-arg]
 
         if not constrained:
             return _write()
@@ -356,6 +374,7 @@ class NoSQLKVAdapter(NoSQLConstraintsMixin):
     def delete(
         self, model: type, entity_id: Union[Any, Lookup], *, etag: Optional[str] = None
     ) -> JsonDict:
+        self._require_etag_support(etag)
         if isinstance(entity_id, dict):
             pk = entity_id.get("partition_key") or entity_id.get("pk")
             rk = entity_id.get("row_key") or entity_id.get("rk") or entity_id.get("id")

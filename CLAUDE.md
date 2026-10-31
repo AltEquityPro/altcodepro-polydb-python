@@ -203,6 +203,31 @@ See [BUILD_GUIDE.md](BUILD_GUIDE.md) and [Readme_Integration_Tests.md](Readme_In
 3. Run black/isort and the relevant test markers.
 
 ## Recent changes
+- **2.6.2 -- ETag (optimistic concurrency) exposed and enforced on Azure Table; `__version__` and `pyproject` agree again.** Before this,
+  `update(..., etag=)` was accepted and **silently ignored** (`NoSQLKVAdapter.patch` never used it) and `delete(..., etag=)` passed it to
+  the SDK without a `match_condition`, which the SDK treats as unconditional; no read returned an etag. Now:
+  - **Exposure is opt-in** (`polydb/etag.py`): `read` / `read_one` / `create` / `update` / `upsert` (also on `PolyDB`, `AsyncPolyDB`) take
+    `with_etag=True` and then return each row with a reserved read-only key `_etag`. Without the flag rows are byte-for-byte unchanged (API
+    responses, audit log, encrypted-field handling untouched). The flag travels in a `ContextVar` (`expose_etag()`), so adapters need no extra
+    parameter. `_etag` is never written (keys starting `_` are skipped), a row read with its tag can be passed straight back to `update()`, and
+    the audit log never records it. `with_etag=True` bypasses the external read cache. `project_rows` keeps `_etag` through `fields`/`omit`.
+  - **Enforcement** (`AzureTableStorageAdapter`): `update(..., etag=X)` is `update_entity(MERGE, etag=X, IfNotModified)`; `delete(..., etag=X)` is
+    a conditional `delete_entity`. A mismatch (HTTP 412) or a row that no longer exists raises the new `polydb.ConcurrencyError` (`.missing` tells
+    which). It is a `CloudDBError`, deliberately NOT a `NoSQLError`, so the adapter's `@retry(NoSQLError)` and `DatabaseFactory._run` never retry
+    a lost race. With `with_etag=True` the result of `update`/`create`/`upsert` carries the NEW `_etag`, so conditional updates can be chained.
+  - **No silent ignoring:** a backend whose `capabilities.supports_etag` is false (everything except Azure Table today) raises
+    `OperationNotSupportedError` when given an etag. DynamoDB (conditional expression), Firestore (`update_time` precondition), MongoDB and
+    Vercel KV can implement the same contract later; the base class and the tests are ready for them.
+  - **Delete ordering bug fixed:** `_delete_raw` removed the whole-entity overflow blob BEFORE the entity, so a refused (now conditional) delete
+    would have left a row pointing at nothing. The blob is removed only after the entity is gone.
+  - The enums handed to the SDK (`MatchConditions`, `UpdateMode`) are resolved from the SDK modules as they are at call time
+    (`_sdk_enum`): enum members from two copies of a module are never equal, and this suite reloads `azure.*` in places.
+  - Tests: `tests/test_etag_unit.py` (fake table with real etag semantics, no emulator) and `tests/test_etag_azure.py` (Azurite: compare-and-swap,
+    six threads racing from one version, conditional delete, large overflowed property). Several existing test modules stub or reload `azure.*`
+    in `sys.modules`; after them nothing real-SDK works in the same process (the existing `test_azure.py::test_put_separate_models_isolated`
+    fails the same way on an untouched checkout), so `test_etag_azure.py` **skips itself** in a polluted process. Run it alone:
+    `pytest tests/test_etag_azure.py -m azure`. Suite comparison against the untouched code (same environment): identical 41 failures + 8 errors
+    (Mongo/Postgres/RabbitMQ/SQS/Firestore not available), nothing new.
 - **2.6.0 -- PostgreSQL moved to psycopg 3, lazy pool, pipelined read batches.** `PostgreSQLAdapter` is now on `psycopg` (v3,
   `psycopg[binary,pool]`); `psycopg2` is gone from this package. Three things changed together:
   1. **`LazyPool` replaces `BoundedWarmPool`.** The old pool opened `POSTGRES_MIN_CONNECTIONS` (default 5, QA had 8) connections the

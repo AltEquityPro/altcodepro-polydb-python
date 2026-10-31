@@ -144,8 +144,9 @@ class PolyDB:
         data: JsonDict,
         *,
         engine_override: Optional[EngineOverride] = None,
+        with_etag: bool = False,
     ) -> JsonDict:
-        return self.db.create(model, data, engine_override=engine_override)
+        return self.db.create(model, data, engine_override=engine_override, with_etag=with_etag)
 
     def read(
         self,
@@ -160,6 +161,7 @@ class PolyDB:
         engine_override: Optional[EngineOverride] = None,
         fields: Optional[List[str]] = None,
         omit: Optional[List[str]] = None,
+        with_etag: bool = False,
     ) -> List[JsonDict]:
         return self.db.read(
             model,
@@ -172,6 +174,7 @@ class PolyDB:
             engine_override=engine_override,
             fields=fields,
             omit=omit,
+            with_etag=with_etag,
         )
 
     def read_one(
@@ -182,6 +185,7 @@ class PolyDB:
         no_cache: bool = False,
         include_deleted: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        with_etag: bool = False,
     ) -> Optional[JsonDict]:
         return self.db.read_one(
             model,
@@ -189,6 +193,7 @@ class PolyDB:
             no_cache=no_cache,
             include_deleted=include_deleted,
             engine_override=engine_override,
+            with_etag=with_etag,
         )
 
     def get(
@@ -236,6 +241,7 @@ class PolyDB:
         etag: Optional[str] = None,
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        with_etag: bool = False,
     ) -> JsonDict:
         return self.db.update(
             model,
@@ -244,6 +250,7 @@ class PolyDB:
             etag=etag,
             replace=replace,
             engine_override=engine_override,
+            with_etag=with_etag,
         )
 
     def upsert(
@@ -253,12 +260,14 @@ class PolyDB:
         *,
         replace: bool = False,
         engine_override: Optional[EngineOverride] = None,
+        with_etag: bool = False,
     ) -> JsonDict:
         return self.db.upsert(
             model,
             data,
             replace=replace,
             engine_override=engine_override,
+            with_etag=with_etag,
         )
 
     def delete(

@@ -4,7 +4,7 @@ PolyDB - Enterprise Cloud-Independent Database Abstraction
 Full LINQ support, field-level audit, cache, soft delete, overflow storage
 """
 
-__version__ = "2.5.24"
+__version__ = "2.6.2"
 
 from .aio import AsyncDatabaseFactory, AsyncPolyDB
 from .audit.context import AuditContext
@@ -14,6 +14,7 @@ from .databaseFactory import DatabaseFactory
 from .errors import (
     AdapterConfigurationError,
     CloudDBError,
+    ConcurrencyError,
     ConnectionError,
     DatabaseError,
     InsufficientBalanceError,
@@ -57,6 +58,7 @@ __all__ = [
     "GCReport",
     # Errors
     "CloudDBError",
+    "ConcurrencyError",
     "DatabaseError",
     "NoSQLError",
     "StorageError",

@@ -24,6 +24,15 @@ class NoSQLError(CloudDBError):
     pass
 
 
+class ConcurrencyError(CloudDBError):
+    """A conditional write lost the race: the row's version (ETag) is no longer the one the caller read, or the row is gone.
+    Re-read the row, re-apply the change and retry. Deliberately NOT a NoSQLError and never retried automatically."""
+
+    def __init__(self, message: str = "etag mismatch: the row changed since it was read", *, missing: bool = False) -> None:
+        super().__init__(message)
+        self.missing = missing
+
+
 class StorageError(CloudDBError):
     """Object storage operation failed"""
 

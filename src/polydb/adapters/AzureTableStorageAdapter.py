@@ -15,7 +15,8 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from ..base.NoSQLKVAdapter import NoSQLKVAdapter
-from ..errors import ConnectionError, NoSQLError
+from ..errors import ConcurrencyError, ConnectionError, NoSQLError
+from ..etag import ETAG_KEY, etag_requested
 from ..json_safe import json_safe
 from ..models import PageResult, PartitionConfig
 from ..retry import retry
@@ -28,7 +29,8 @@ logger = logging.getLogger(__name__)
 # paths need them per field. Guarded so importing polydb without the azure
 # extra still works -- in that state nothing in this adapter functions anyway.
 try:
-    from azure.data.tables import EdmType, EntityProperty
+    from azure.core import MatchConditions
+    from azure.data.tables import EdmType, EntityProperty, UpdateMode
 except ImportError:  # pragma: no cover - azure extra not installed
     EdmType = None  # type: ignore[assignment]
     EntityProperty = None  # type: ignore[assignment]
@@ -103,6 +105,51 @@ class _SelfHealingTableClient:
                 self._heal()
                 return getattr(self._client, name)(*args, **kwargs)
         return call
+
+def _entity_etag(entity: Any) -> Optional[str]:
+    """The service's version tag of an entity returned by the SDK (`entity.metadata['etag']`)."""
+    meta = getattr(entity, "metadata", None) or {}
+    value = meta.get("etag") if isinstance(meta, dict) else None
+    return str(value) if value else None
+
+
+def _sdk_enum(table_client: Any, name: str, fallback: Any) -> Any:
+    """The enum class the SDK itself compares against. The SDK validates `match_condition == MatchConditions.IfNotModified`
+    inside `_get_match_condition` with the class ITS module imported, and enum members from two copies of a module are never
+    equal. If `azure.*` was reloaded or stubbed after this adapter module was imported (test suites do exactly that), our own
+    import-time class is a different one and the write fails with "Unsupported match condition". So: (1) read the class from
+    the function that does the comparison, reached through the client when it is the raw SDK client; (2) otherwise -- the
+    adapter wraps clients in a self-healing proxy -- read it from the SDK modules as they are NOW; (3) our own import for
+    fakes and other SDK versions."""
+    fn = getattr(table_client, "update_entity", None)
+    fn = getattr(fn, "__func__", fn)
+    glb = getattr(fn, "__globals__", None) or {}
+    helper_glb = getattr(glb.get("_get_match_condition"), "__globals__", None) or {}
+    if name == "MatchConditions" and "MatchConditions" in helper_glb:
+        return helper_glb["MatchConditions"]
+    if name in glb and "_get_match_condition" in glb:
+        return glb[name]
+    try:
+        import importlib
+
+        if name == "MatchConditions":
+            return importlib.import_module("azure.data.tables._serialize").MatchConditions
+        return getattr(importlib.import_module("azure.data.tables"), name)
+    except Exception:  # noqa: BLE001 - not the real SDK
+        return fallback
+
+
+def _precondition_failed(exc: BaseException) -> bool:
+    """HTTP 412 from a conditional write (`If-Match` did not match)."""
+    name = type(exc).__name__
+    text = str(exc)
+    return (
+        name in ("ResourceModifiedError", "ResourceNotModifiedError")
+        or "UpdateConditionNotSatisfied" in text
+        or "ConditionNotMet" in text
+        or getattr(exc, "status_code", None) == 412
+    )
+
 
 class AzureTableStorageAdapter(NoSQLKVAdapter):
     """
@@ -562,7 +609,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
     @retry(max_attempts=3, delay=1.0, exceptions=(NoSQLError,))
     def _put_raw(
-        self, model: type, pk: str, rk: str, data: JsonDict, *, _insert_only: bool = False
+        self,
+        model: type,
+        pk: str,
+        rk: str,
+        data: JsonDict,
+        *,
+        _insert_only: bool = False,
+        etag: Optional[str] = None,
     ) -> JsonDict:
         try:
             table_client = self._get_table_client(model)
@@ -639,11 +693,22 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     reference_entity[k] = v
 
             if _insert_only:
-                table_client.create_entity(reference_entity)  # 409 when the key is taken: atomic claim
+                written = table_client.create_entity(reference_entity)  # 409 when the key is taken: atomic claim
+            elif etag is not None:
+                # Conditional write: only if the row still has the version the caller read (If-Match). The default mode is
+                # MERGE, the same as upsert_entity above, so the same fields are written.
+                written = table_client.update_entity(
+                    reference_entity,
+                    mode=_sdk_enum(table_client, "UpdateMode", UpdateMode).MERGE,
+                    etag=etag,
+                    match_condition=_sdk_enum(table_client, "MatchConditions", MatchConditions).IfNotModified,
+                )
             else:
-                table_client.upsert_entity(reference_entity)
+                written = table_client.upsert_entity(reference_entity)
 
             restored = self._unpack_entity(model, entity)
+            if etag_requested() and isinstance(written, dict) and written.get("etag"):
+                restored[ETAG_KEY] = str(written["etag"])  # the NEW version, so updates can be chained
             # Mirror the write-side condition above (line ~521): only
             # synthesize "id" onto the return value when the caller's own
             # data didn't already supply one. Unconditionally overwriting
@@ -668,6 +733,14 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             return restored
 
         except Exception as e:
+            if etag is not None and _precondition_failed(e):
+                raise ConcurrencyError(
+                    "etag mismatch: the row changed since it was read; re-read it and retry"
+                ) from e
+            if etag is not None and (
+                type(e).__name__ == "ResourceNotFoundError" or "ResourceNotFound" in str(e)
+            ):
+                raise ConcurrencyError("etag mismatch: the row no longer exists", missing=True) from e
             if _insert_only and (
                 type(e).__name__ == "ResourceExistsError" or "EntityAlreadyExists" in str(e)
             ):
@@ -707,6 +780,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             out = self._unpack_entity(model, restored_entity)
             if "id" not in out:
                 out["id"] = safe_rk
+            if etag_requested() and (tag := _entity_etag(entity)):
+                out[ETAG_KEY] = tag
 
             return out
 
@@ -844,6 +919,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
 
                 if "id" not in out and "RowKey" in ent_dict:
                     out["id"] = ent_dict["RowKey"]
+                if etag_requested() and (tag := _entity_etag(ent)):
+                    out[ETAG_KEY] = tag
 
                 results.append(out)
 
@@ -863,6 +940,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             safe_pk = self._sanitize_pk_rk(pk)
             safe_rk = self._sanitize_pk_rk(rk)
 
+            stale_blob: Optional[str] = None
             try:
                 entity = table_client.get_entity(safe_pk, safe_rk)
                 entity_dict = dict(entity)
@@ -871,16 +949,35 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     return {"deleted": False}
 
                 if entity_dict.get("_overflow"):
-                    blob_key = entity_dict.get("_blob_key")
-                    if blob_key:
-                        self._blob_delete(blob_key)
+                    stale_blob = entity_dict.get("_blob_key")
             except Exception:
                 pass
 
-            table_client.delete_entity(safe_pk, safe_rk, etag=etag)
+            if etag is None:
+                table_client.delete_entity(safe_pk, safe_rk)
+            else:
+                # Before this fix the etag was passed without a match condition, which the SDK treats as unconditional.
+                table_client.delete_entity(
+                    safe_pk,
+                    safe_rk,
+                    etag=etag,
+                    match_condition=_sdk_enum(table_client, "MatchConditions", MatchConditions).IfNotModified,
+                )
+            # The blob goes only AFTER the entity is gone: deleting it first left a row pointing at nothing whenever the
+            # (now conditional) delete was refused.
+            if stale_blob:
+                self._blob_delete(stale_blob)
             return {"deleted": True, "PartitionKey": safe_pk, "RowKey": safe_rk, "id": safe_rk}
 
         except Exception as e:
+            if etag is not None and _precondition_failed(e):
+                raise ConcurrencyError(
+                    "etag mismatch: the row changed since it was read; re-read it and retry"
+                ) from e
+            if etag is not None and (
+                type(e).__name__ == "ResourceNotFoundError" or "ResourceNotFound" in str(e)
+            ):
+                raise ConcurrencyError("etag mismatch: the row no longer exists", missing=True) from e
             raise NoSQLError(f"Azure Table delete failed: {str(e)}")
 
     # -----------------------------
@@ -896,6 +993,7 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
             server_filter=True,
             native_cursor=True,
             supports_count=False,
+            supports_etag=True,
         )
 
     def query_paged(self, model: type, request) -> "PageResult":
@@ -960,6 +1058,8 @@ class AzureTableStorageAdapter(NoSQLKVAdapter):
                     out = self._unpack_entity(model, restored)
                     if "id" not in out and "RowKey" in ent_dict:
                         out["id"] = ent_dict["RowKey"]
+                    if etag_requested() and (tag := _entity_etag(ent)):
+                        out[ETAG_KEY] = tag
                     items.append(out)
                 next_azure_ct = page_iter.continuation_token
             except StopIteration:

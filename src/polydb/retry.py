@@ -25,6 +25,8 @@ _NON_RETRYABLE_MARKERS = (
     "ResourceNotFound",
     "InvalidArgument",
     "AuthenticationFailed",
+    "etag mismatch",  # ConcurrencyError: the same call would lose the same race
+    "UpdateConditionNotSatisfied",
     # session_vars' allow-list rejection (PostgreSQLAdapter._apply_session_vars) --
     # a caller passing a session variable name outside the fixed allow-list is a
     # programming error, not a transient one; the identical resolved call would

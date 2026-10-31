@@ -54,6 +54,7 @@ class BackendCapabilities:
     server_filter: bool = False
     native_cursor: bool = False
     supports_count: bool = True
+    supports_etag: bool = False  # conditional update/delete on a row version (ETag); see polydb.etag
 
 
 @dataclass
